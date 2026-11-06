@@ -1,0 +1,30 @@
+[project]
+name = "subtitle-translator"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6>=6.7",
+  "anthropic>=2.6.0",
+  "pysubs2>=1.7",
+  "jsonschema>=4.22",
+  "keyring>=25",
+  "platformdirs>=4.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.4", "pyinstaller>=6.6"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["subtitle_translator*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "live: calls real AI backends (costs money or Max quota)",
+  "media: needs ffmpeg/ffprobe on PATH or in bin/",
+]
+addopts = "-m 'not live'"

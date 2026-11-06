@@ -1,1 +1,7 @@
 .superpowers/
+.venv/
+__pycache__/
+build/
+dist/
+bin/*.exe
+*.stproj.json
