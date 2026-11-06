@@ -19,6 +19,7 @@ def test_validate_json():
     ('```json\n{"a": 1}\n```', {"a": 1}),
     ('Here you go:\n{"a": [1, {"b": 2}]}\nThanks', {"a": [1, {"b": 2}]}),
     ('result: [{"id": 1}, {"id": 2}] done', [{"id": 1}, {"id": 2}]),
+    ('result: [{"id": 1}] done', [{"id": 1}]),
 ])
 def test_extract_json(text, expected):
     assert extract_json(text) == expected

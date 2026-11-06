@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -114,11 +115,20 @@ def grab_frame(video: str | Path, t: float, out_png: str | Path, width: int = 64
     return out
 
 
+_SIDECAR_TAGS = re.compile(r"(\.[\w-]+)*")
+
+
 def sidecar_subs(video: str | Path) -> list[Path]:
     v = Path(video)
     found = []
     for name in glob.glob(glob.escape(str(v.parent / v.stem)) + "*"):
         p = Path(name)
-        if p.suffix.lower() in SUB_SUFFIXES and ".th." not in p.name.lower():
-            found.append(p)
+        if p.suffix.lower() not in SUB_SUFFIXES:
+            continue
+        # Only ".tag" segments may sit between the stem and the extension, so
+        # "EP1" must not claim "EP10.srt" or "EP1 extra.srt".
+        rest = p.name[len(v.stem):-len(p.suffix)]
+        if not _SIDECAR_TAGS.fullmatch(rest) or ".th." in p.name.lower():
+            continue
+        found.append(p)
     return sorted(found)

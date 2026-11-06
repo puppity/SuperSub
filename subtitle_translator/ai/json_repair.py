@@ -19,11 +19,12 @@ def extract_json(text: str) -> Any:
             return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
-    for opener, closer in (("{", "}"), ("[", "]")):
-        i, j = t.find(opener), t.rfind(closer)
-        if i != -1 and j > i:
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(t):
+        if ch in "{[":
             try:
-                return json.loads(t[i:j + 1])
+                obj, _ = decoder.raw_decode(t, i)
+                return obj
             except json.JSONDecodeError:
                 continue
     raise ValueError("ไม่พบ JSON ในคำตอบ")

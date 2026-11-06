@@ -41,6 +41,16 @@ def test_sidecar_subs(tmp_path):
     assert names == ["EP01 [x].ja.ass", "EP01 [x].srt"]
 
 
+def test_sidecar_subs_ignores_other_episodes(tmp_path):
+    v = tmp_path / "EP1.mkv"
+    v.write_bytes(b"")
+    (tmp_path / "EP1.srt").write_text("x")
+    (tmp_path / "EP1.ja.ass").write_text("x")
+    (tmp_path / "EP10.srt").write_text("x")
+    names = sorted(p.name for p in sidecar_subs(v))
+    assert names == ["EP1.ja.ass", "EP1.srt"]
+
+
 def _have_ffmpeg():
     try:
         tool_path("ffmpeg")

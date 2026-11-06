@@ -53,6 +53,8 @@ def load_settings(path: Path | None = None) -> Settings:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return Settings()
+    if not isinstance(raw, dict):
+        return Settings()
     known = {f.name for f in fields(Settings)}
     return Settings(**{k: v for k, v in raw.items() if k in known})
 

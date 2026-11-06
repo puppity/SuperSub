@@ -24,6 +24,8 @@ def test_settings_roundtrip_ignores_unknown_keys(tmp_path):
     assert st.load_settings(path).backend == "api"
     assert st.load_settings(tmp_path / "none.json") == st.Settings()
     assert "key" not in path.read_text(encoding="utf-8").lower()
+    path.write_text("[]", encoding="utf-8")
+    assert st.load_settings(path) == st.Settings()
 
 
 class MemoryKeyring(KeyringBackend):
