@@ -109,6 +109,10 @@ def test_bad_responses(msg, kind):
     (status_error(anthropic.BadRequestError, 400, "Your credit balance is too low"), AIErrorKind.QUOTA),
     (status_error(anthropic.BadRequestError, 400, "bad"), AIErrorKind.BAD_REQUEST),
     (status_error(anthropic.InternalServerError, 500), AIErrorKind.NETWORK),
+    (status_error(anthropic.PermissionDeniedError, 403), AIErrorKind.AUTH),
+    (status_error(anthropic.NotFoundError, 404, "model: nope"), AIErrorKind.BAD_REQUEST),
+    (status_error(anthropic.UnprocessableEntityError, 422), AIErrorKind.BAD_REQUEST),
+    (anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")), AIErrorKind.NETWORK),
 ])
 def test_sdk_errors_are_mapped(exc, kind):
     with pytest.raises(Exception) as e:
@@ -120,3 +124,17 @@ def test_estimate_and_check():
     b = ApiBackend("k", "claude-opus-5-5", client=fake_client(message()))
     assert b.estimate_cost([REQ, REQ], 100_000) == pytest.approx((500_000 * 4 + 100_000 * 20) / 1e6)
     assert b.check() == "เชื่อมต่อ API ได้"
+
+
+@pytest.mark.parametrize("call", ["run", "check", "estimate"])
+def test_all_entry_points_map_errors_without_english_sdk_text(call):
+    exc = status_error(anthropic.NotFoundError, 404, "model: claude-x not_found_error")
+    client = fake_client(exc)
+    client.models = SimpleNamespace(retrieve=lambda m: (_ for _ in ()).throw(exc))
+    client.messages.count_tokens = lambda **kw: (_ for _ in ()).throw(exc)
+    b = ApiBackend("k", "claude-haiku-5-5", client=client)
+    fn = {"run": lambda: b.run_json(REQ), "check": b.check, "estimate": lambda: b.estimate_cost([REQ], 10)}[call]
+    with pytest.raises(Exception) as e:
+        fn()
+    assert e.value.kind is AIErrorKind.BAD_REQUEST
+    assert "404" in str(e.value) and "not_found" not in str(e.value) and "claude-x" not in str(e.value)
