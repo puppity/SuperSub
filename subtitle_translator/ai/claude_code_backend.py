@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from ..core.media import no_window
+from .backend import AIError, AIErrorKind, AIRequest, AIResult, Usage, validate_json
+from .json_repair import extract_json
+
+MODEL_ALIAS = {"claude-opus-5-5": "opus", "claude-sonnet-5-5": "sonnet", "claude-haiku-5-5": "haiku"}
+_LIMIT = re.compile(r"usage limit|rate limit|limit reached|out of extra usage", re.I)
+_RESET = re.compile(r"resets?\s+(?:at\s+)?(.+?)(?:\.\s|\.$|$)", re.I | re.M)
+# "failed to authenticate / OAuth session expired" is the real CLI wording when the Max login lapses.
+_LOGIN = re.compile(r"/login|log ?in|not authenticated|invalid api key|failed to authenticate|oauth|session expired", re.I)
+
+
+def find_claude() -> str | None:
+    found = shutil.which("claude")
+    if found:
+        return found
+    for cand in (Path.home() / ".local" / "bin" / "claude.exe",
+                 Path(os.environ.get("APPDATA", "")) / "npm" / "claude.cmd"):
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+class ClaudeCodeBackend:
+    name = "claude_code"
+
+    def __init__(self, model: str, exe: str | None = None, runner=subprocess.run):
+        self.model = model
+        self.exe = exe
+        self.runner = runner
+        self.workdir = tempfile.mkdtemp(prefix="subtrans-cc-")   # keeps project CLAUDE.md files out
+
+    def _prompt(self, req: AIRequest, error_note: str | None = None) -> str:
+        parts = [req.system, req.context, req.task,
+                 "Reply with ONLY one JSON value that matches this JSON Schema. "
+                 "No prose, no code fences, do not use any tools.\n" + json.dumps(req.schema, ensure_ascii=False)]
+        if error_note:
+            parts.append(error_note)
+        return "\n\n".join(parts)
+
+    def _call(self, prompt: str) -> str:
+        exe = self.exe or find_claude()
+        if not exe:
+            raise AIError(AIErrorKind.NOT_INSTALLED, "ไม่พบ Claude Code — ติดตั้งแล้วล็อกอินด้วยบัญชี Max ก่อน")
+        args = [exe, "-p", "--output-format", "json", "--model", MODEL_ALIAS.get(self.model, "opus")]
+        try:
+            r = self.runner(args, input=prompt.encode("utf-8"), capture_output=True,
+                            timeout=600, cwd=self.workdir, **no_window())
+        except FileNotFoundError as exc:
+            raise AIError(AIErrorKind.NOT_INSTALLED, "ไม่พบ Claude Code — ติดตั้งแล้วล็อกอินด้วยบัญชี Max ก่อน") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise AIError(AIErrorKind.NETWORK, "Claude Code ตอบช้าเกิน 10 นาที") from exc
+        out = r.stdout.decode("utf-8", "replace")
+        err = r.stderr.decode("utf-8", "replace")
+        try:
+            outer = json.loads(out)
+        except json.JSONDecodeError:
+            outer = None
+        result = outer.get("result", "") if isinstance(outer, dict) else out
+        is_error = r.returncode != 0 or (isinstance(outer, dict) and bool(outer.get("is_error")))
+        if is_error:
+            blob = f"{result}\n{err}"
+            if _LIMIT.search(blob):
+                m = _RESET.search(blob)
+                raise AIError(AIErrorKind.QUOTA, "โควตา Claude Max เต็ม",
+                              retry_after=m.group(1).strip() if m else None)
+            if _LOGIN.search(blob):
+                raise AIError(AIErrorKind.AUTH,
+                              "Claude Code ยังไม่ได้ล็อกอิน — เปิด Terminal แล้วพิมพ์ claude เพื่อล็อกอิน")
+            raise AIError(AIErrorKind.BAD_REQUEST, blob.strip()[:500] or f"claude ออกด้วยรหัส {r.returncode}")
+        return result
+
+    def _parse(self, text: str, schema: dict):
+        data = extract_json(text)          # ValueError if none
+        validate_json(data, schema)        # AIError(INVALID_OUTPUT) if wrong shape
+        return data
+
+    def run_json(self, req: AIRequest) -> AIResult:
+        text = self._call(self._prompt(req))
+        try:
+            data = self._parse(text, req.schema)
+        except (ValueError, AIError) as first:
+            note = f"Your previous reply was invalid ({first}). Return only valid JSON for the schema."
+            text = self._call(self._prompt(req, note))
+            try:
+                data = self._parse(text, req.schema)
+            except ValueError as exc:
+                raise AIError(AIErrorKind.INVALID_OUTPUT, "Claude Code ตอบไม่เป็น JSON") from exc
+        return AIResult(data, Usage(), None)
+
+    def estimate_cost(self, reqs: list[AIRequest], expected_output_tokens: int) -> float | None:
+        return None
+
+    def check(self) -> str:
+        self._call("Reply with exactly: OK")
+        return "เชื่อมต่อ Claude Code ได้"
