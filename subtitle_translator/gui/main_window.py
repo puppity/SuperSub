@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         self.go(1)
 
     def closeEvent(self, event) -> None:
-        pages = (self.queue_page, self.review_page)
+        pages = (self.queue_page, self.review_page, self.settings_page)
         results = [page.shutdown() for page in pages]     # stop every page, not just the first
         if all(results):
             event.accept()

@@ -212,6 +212,13 @@ class SettingsPage(QWidget):
         self._worker.failed.connect(lambda exc: self._finish_check(str(exc), COLORS["bad"]))
         self._worker.start()
 
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Join the connection-check thread. True when nothing is left running."""
+        if self._worker is None:
+            return True
+        self._worker.wait(timeout_ms)
+        return not self._worker.isRunning()
+
     def _set_checking(self, busy: bool) -> None:
         self.save_test_btn.setEnabled(not busy)
         self.cc_check_btn.setEnabled(not busy)

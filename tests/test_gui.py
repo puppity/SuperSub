@@ -438,3 +438,31 @@ def test_queue_runner_snapshots_settings(tmp_path):
     r = QueueRunner([], s)
     s.model = "claude-haiku-5-5"
     assert r.settings.model == "claude-opus-5-5" and r.settings is not s
+
+
+def test_settings_shutdown_joins_worker_and_close_waits(qtbot, fakes, tmp_path):
+    import threading
+    from PySide6.QtGui import QCloseEvent
+    gate = threading.Event()
+    page = SettingsPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    assert page.shutdown(100) is True                  # nothing running
+    page._run_check(lambda: gate.wait(5) and "done")
+    assert page.shutdown(50) is False                  # still blocked: reported, not hung
+    gate.set()
+    assert page.shutdown(5000) is True
+    assert not page._worker.isRunning()
+
+    w = MainWindow(Settings(backend="claude_code"), settings_path=tmp_path / "s.json")
+    qtbot.addWidget(w)
+    gate2 = threading.Event()
+    w.settings_page._run_check(lambda: gate2.wait(5) and "x")
+    w.settings_page.shutdown = lambda timeout_ms=5000: False
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    assert not ev.isAccepted()
+    del w.settings_page.shutdown
+    gate2.set()
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    assert ev.isAccepted()
