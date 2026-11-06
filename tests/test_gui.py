@@ -208,3 +208,72 @@ def test_estimate_runner_reports_none_when_backend_unavailable(qtbot, tmp_path, 
         runner.start()
     runner.wait()
     assert blocker.args == [0, None]
+
+
+from helpers import make_episode
+from subtitle_translator.core.models import Character, Project
+from subtitle_translator.gui.review_page import ReviewPage, cps, filter_ids
+
+
+def review_project(tmp_path):
+    ep = make_episode(4)
+    ep.video_path = str(tmp_path / "EP01.mkv")
+    ep.characters = [Character(key="yuki", name_src="ユキ", name_th="ยูกิ", color="#FBBF24")]
+    for c in ep.cues:
+        c.thai, c.status, c.speaker, c.speaker_conf = f"ไทย {c.id}", "translated", "yuki", 0.9
+    ep.cues[1].speaker_conf = 0.3
+    ep.cues[2].status = "failed"
+    return Project(episode=ep, backend="api", model="claude-opus-5-5", stage="done")
+
+
+def test_filters_and_cps(tmp_path):
+    ep = review_project(tmp_path).episode
+    assert filter_ids(ep.cues, "all", "") == [1, 2, 3, 4]
+    assert filter_ids(ep.cues, "unsure", "") == [2]
+    assert filter_ids(ep.cues, "failed", "") == [3]
+    assert filter_ids(ep.cues, "all", "ไทย 4") == [4]
+    assert cps(ep.cues[0], "x" * 15) == 10.0
+
+
+def test_review_page_edit_saves_project(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr("subtitle_translator.gui.review_page.grab_frame", lambda *a, **k: tmp_path / "x.png")
+    p = review_project(tmp_path)
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(p)
+    assert page.table.rowCount() == 4
+    page.select(2)
+    assert page.editor.toPlainText() == "ไทย 2"
+    page.editor.setPlainText("แก้แล้ว")
+    page.save_edit()
+    assert p.episode.cue(2).thai == "แก้แล้ว" and p.episode.cue(2).status == "edited"
+    assert (tmp_path / "EP01.stproj.json").exists()
+    page.set_filter("failed")
+    assert page.table.rowCount() == 1
+
+
+def test_review_retranslate_guard_and_failure(qtbot, tmp_path, monkeypatch, no_real_ai):
+    import threading
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: (_ for _ in ()).throw(rp.MediaError("no ffmpeg")))
+    p = review_project(tmp_path)
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(p)
+    page.select(2)
+    gate = threading.Event()
+
+    def slow(settings):
+        gate.wait(5)
+        raise RuntimeError("down")
+    monkeypatch.setattr(rp, "make_backend", slow)
+    monkeypatch.setattr(rp.QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    page.retranslate()
+    first = page._worker
+    assert not page.retranslate_btn.isEnabled()
+    page.retranslate()                 # ignored while running
+    assert page._worker is first
+    gate.set()
+    qtbot.waitUntil(lambda: page.retranslate_btn.isEnabled(), timeout=5000)
+    first.wait()
+    assert p.episode.cue(2).thai == "ไทย 2"
