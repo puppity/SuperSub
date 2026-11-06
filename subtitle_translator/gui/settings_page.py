@@ -67,11 +67,15 @@ class SettingsPage(QWidget):
         row = QHBoxLayout()
         self.key_edit = QLineEdit(echoMode=QLineEdit.Password, placeholderText="sk-ant-...")
         self.key_edit.setAccessibleName("API key")
-        if get_api_key():
-            self.key_edit.setPlaceholderText("บันทึก key ไว้แล้ว — วางใหม่เพื่อเปลี่ยน")
+        keyring_error = None
+        try:
+            if get_api_key():
+                self.key_edit.setPlaceholderText("บันทึก key ไว้แล้ว — วางใหม่เพื่อเปลี่ยน")
+        except Exception as exc:  # broken keyring backend must not stop the window opening
+            keyring_error = exc
         show = QPushButton("แสดง", checkable=True)
         show.toggled.connect(lambda on: self.key_edit.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
-        save_test = QPushButton("บันทึกและทดสอบ")
+        self.save_test_btn = save_test = QPushButton("บันทึกและทดสอบ")
         save_test.setProperty("accent", True)
         save_test.clicked.connect(self._save_and_test_key)
         row.addWidget(self.key_edit, 1)
@@ -86,7 +90,7 @@ class SettingsPage(QWidget):
         cc_lay.addWidget(label("โปรแกรมสั่งงานผ่านคำสั่ง claude -p และใช้โควตาของบัญชี Max", "muted"))
         self.cc_path = label("")
         cc_lay.addWidget(self.cc_path)
-        cc_check = QPushButton("ตรวจการเชื่อมต่อ")
+        self.cc_check_btn = cc_check = QPushButton("ตรวจการเชื่อมต่อ")
         cc_check.clicked.connect(self._test_cc)
         cc_lay.addWidget(cc_check)
         warn = label("ใช้กับบัญชีของคุณบนเครื่องของคุณเท่านั้น ห้ามแจกหรือขายโปรแกรมที่ตั้งค่าแบบนี้ "
@@ -170,6 +174,8 @@ class SettingsPage(QWidget):
         self.backend_api.toggled.connect(lambda on: on and self._set("backend", "api"))
         self.backend_cc.toggled.connect(lambda on: on and self._set("backend", "claude_code"))
         self._sync_backend()
+        if keyring_error is not None:
+            self._show_status(f"เข้าถึงที่เก็บรหัสของ Windows ไม่ได้: {keyring_error}", COLORS["bad"])
 
     def _set(self, key: str, value) -> None:
         setattr(self.s, key, value)
@@ -196,11 +202,23 @@ class SettingsPage(QWidget):
             self._set_out(folder)
 
     def _run_check(self, fn) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
         self.status_label.setText("กำลังตรวจ…")
+        self.status_label.setStyleSheet("")
+        self._set_checking(True)
         self._worker = CallWorker(fn)
-        self._worker.done.connect(lambda msg: self._show_status(str(msg), COLORS["good"]))
-        self._worker.failed.connect(lambda exc: self._show_status(str(exc), COLORS["bad"]))
+        self._worker.done.connect(lambda msg: self._finish_check(str(msg), COLORS["good"]))
+        self._worker.failed.connect(lambda exc: self._finish_check(str(exc), COLORS["bad"]))
         self._worker.start()
+
+    def _set_checking(self, busy: bool) -> None:
+        self.save_test_btn.setEnabled(not busy)
+        self.cc_check_btn.setEnabled(not busy)
+
+    def _finish_check(self, text: str, color: str) -> None:
+        self._set_checking(False)
+        self._show_status(text, color)
 
     def _show_status(self, text: str, color: str) -> None:
         self.status_label.setText(text)
@@ -208,11 +226,15 @@ class SettingsPage(QWidget):
 
     def _save_and_test_key(self) -> None:
         key = self.key_edit.text().strip()
-        if key:
-            set_api_key(key)
-            self.key_edit.clear()
-            self.key_edit.setPlaceholderText("บันทึก key ไว้แล้ว — วางใหม่เพื่อเปลี่ยน")
-        stored = get_api_key()
+        try:
+            if key:
+                set_api_key(key)
+                self.key_edit.clear()
+                self.key_edit.setPlaceholderText("บันทึก key ไว้แล้ว — วางใหม่เพื่อเปลี่ยน")
+            stored = get_api_key()
+        except Exception as exc:  # keep the typed key so the user can retry
+            self._show_status(f"เข้าถึงที่เก็บรหัสของ Windows ไม่ได้: {exc}", COLORS["bad"])
+            return
         if not stored:
             self._show_status("ยังไม่ได้ใส่ API key", COLORS["bad"])
             return
