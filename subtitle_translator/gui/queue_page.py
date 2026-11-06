@@ -15,6 +15,7 @@ from ..ai.factory import make_backend
 from ..core.media import MediaError, SubTrack, lang_of, list_sub_tracks, pick_track, sidecar_subs
 from ..core.models import Project
 from ..core.pricing import MODELS
+from ..core.project_store import ProjectFileError
 from ..core.settings import Settings, cache_dir
 from ..core.subio import SubtitleReadError
 from ..export import export_project
@@ -94,7 +95,7 @@ class QueueRunner(QThread):
                 if exc.kind in STOP_QUEUE:
                     self.paused.emit(friendly(exc))
                     return
-            except (MediaError, SubtitleReadError) as exc:
+            except (MediaError, SubtitleReadError, ProjectFileError) as exc:
                 self.item_failed.emit(row, str(exc))
             except Exception as exc:
                 log.exception("unexpected failure on %s", item.video)
