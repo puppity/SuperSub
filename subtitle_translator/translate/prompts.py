@@ -94,8 +94,9 @@ TRANSLATE_SCHEMA = {
 
 
 def _mmss(t: float) -> str:
-    m, s = divmod(t, 60)
-    return f"{int(m):02d}:{s:04.1f}"
+    tenths = round(t * 10)
+    m, rest = divmod(tenths, 600)
+    return f"{m:02d}:{rest / 10:04.1f}"
 
 
 def format_cues(cues: list[Cue], names: dict[str, str] | None = None) -> str:
@@ -104,11 +105,12 @@ def format_cues(cues: list[Cue], names: dict[str, str] | None = None) -> str:
         if c.skip:
             continue
         if names is not None:
-            tag = f"{names.get(c.speaker or '', '?')}→{c.addressee or '?'}"
+            tag = f"{names.get(c.speaker or '') or '?'}→{c.addressee or '?'}"
         else:
             tag = "/".join(x for x in (c.actor, c.style) if x) or "-"
         text = c.src.replace("\n", " / ")
-        out.append(f"{c.id}\t{_mmss(c.start)}\t{tag}\t{text}")
+        dur = f"{c.end - c.start:.1f}s"
+        out.append(f"{c.id}\t{_mmss(c.start)}\t{dur}\t{tag}\t{text}")
     return "\n".join(out)
 
 

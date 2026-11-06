@@ -10,7 +10,7 @@ UNKNOWN_COLOR = "#A8A29E"
 
 def build_analyze_request(ep: Episode, effort: str) -> AIRequest:
     context = (f"Source language: {LANG_NAMES.get(ep.src_lang, ep.src_lang)}\n"
-               "Columns: id, start time, Name/Actor/style tag, text\n\n"
+               "Columns: id, start time, duration, Name/Actor/style tag, text\n\n"
                "SUBTITLES:\n" + format_cues(ep.cues))
     return AIRequest(system=SYSTEM_ANALYZE, context=context,
                      task="Analyze the subtitles above and return the JSON.",

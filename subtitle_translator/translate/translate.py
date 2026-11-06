@@ -24,7 +24,7 @@ def build_translate_request(ep: Episode, ids: list[int], effort: str) -> AIReque
     names = _names(ep)
     context = (f"Source language: {LANG_NAMES.get(ep.src_lang, ep.src_lang)}\n"
                + format_sheet(ep)
-               + "\n\nFULL SOURCE SUBTITLES (id, time, speaker→listener, text):\n"
+               + "\n\nFULL SOURCE SUBTITLES (id, time, duration, speaker→listener, text):\n"
                + format_cues(ep.cues, names))
     first = ids[0]
     prev = [c for c in ep.cues if c.id < first and c.thai and not c.skip][-CONTEXT_TAIL:]

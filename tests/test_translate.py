@@ -29,6 +29,8 @@ def test_request_has_stable_context_and_previous_lines():
     ep.cues[0].thai = "ก่อนหน้า"
     req = build_translate_request(ep, [2, 3], "medium")
     assert "line 4" in req.context and "CHARACTER SHEET" in req.context
+    assert "(id, time, duration, speaker→listener, text)" in req.context
+    assert "4\t00:08.0\t1.5s\t" in req.context
     assert "1\tก่อนหน้า" in req.task
     assert ids_in(req) == [2, 3]
     assert build_translate_request(ep, [4], "medium").context == req.context

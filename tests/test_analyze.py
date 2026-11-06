@@ -33,9 +33,25 @@ def test_format_cues_skips_effects_and_flattens_newlines():
     ep.cues[2].addressee = "ฮารุ"
     out = format_cues(ep.cues, names={"yuki": "ยูกิ"})
     lines = out.splitlines()
-    assert lines[0] == "1\t00:02.0\t?→?\ta / b"
-    assert lines[1] == "3\t00:06.0\tยูกิ→ฮารุ\tline 3"
+    assert lines[0] == "1\t00:02.0\t1.5s\t?→?\ta / b"
+    assert lines[1] == "3\t00:06.0\t1.5s\tยูกิ→ฮารุ\tline 3"
     assert len(lines) == 2
+
+
+def test_format_cues_rounds_time_before_splitting_minutes():
+    ep = make_episode(1)
+    ep.cues[0].start = 59.96
+    ep.cues[0].end = 61.0
+    out = format_cues(ep.cues)
+    assert out == "1\t01:00.0\t1.0s\t-\tline 1"
+
+
+def test_format_cues_blank_speaker_name_falls_back_to_question_mark():
+    ep = make_episode(1)
+    ep.cues[0].speaker = "yuki"
+    ep.cues[0].addressee = "ฮารุ"
+    out = format_cues(ep.cues, names={"yuki": ""})
+    assert out.split("\t")[3] == "?→ฮารุ"
 
 
 def test_analyze_applies_characters_and_speakers():
