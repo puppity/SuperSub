@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from ..ai.backend import AIError, AIErrorKind
 from ..ai.factory import make_backend
 from ..core.media import MediaError, SubTrack, lang_of, list_sub_tracks, pick_track, sidecar_subs
-from ..core.models import Project
+from ..core.models import Project, untranslated_ids
 from ..core.pricing import MODELS
 from ..core.project_store import ProjectFileError
 from ..core.settings import Settings, cache_dir
@@ -561,6 +561,11 @@ class QueuePage(QWidget):
 
     def export_all(self) -> None:
         done = [it for it in self.items if it.project and it.project.stage == "done"]
+        missing = sum(len(untranslated_ids(it.project.episode.cues)) for it in done)
+        if missing and QMessageBox.question(
+                self, "ยังมีบรรทัดที่ไม่ได้แปล",
+                f"มี {missing} บรรทัดที่ยังไม่ได้แปล จะใส่ข้อความต้นฉบับแทน — ส่งออกต่อไหม?") != QMessageBox.Yes:
+            return
         written = 0
         for it in done:
             try:

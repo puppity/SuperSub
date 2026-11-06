@@ -4,6 +4,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+def untranslated_ids(cues) -> list[int]:
+    """Ids of cues that should have Thai text but do not (they would be exported as source text)."""
+    return [c.id for c in cues if not c.skip and not c.thai]
+
+
 @dataclass
 class Cue:
     id: int

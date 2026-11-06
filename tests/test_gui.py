@@ -466,3 +466,148 @@ def test_settings_shutdown_joins_worker_and_close_waits(qtbot, fakes, tmp_path):
     ev = QCloseEvent()
     w.closeEvent(ev)
     assert ev.isAccepted()
+
+
+def _fake_translator(batches):
+    """FakeBackend whose responder returns Thai for exactly the ids requested."""
+    from fakes import FakeBackend
+    from subtitle_translator.translate.prompts import TRANSLATE_MARKER
+
+    def respond(req):
+        tail = req.task.split(TRANSLATE_MARKER, 1)[1]
+        ids = [int(line.split("\t")[0]) for line in tail.strip().splitlines()]
+        batches.append(ids)
+        return {"lines": [{"id": i, "thai": f"ใหม่ {i}"} for i in ids]}
+    return FakeBackend([respond] * 20)
+
+
+def _failed_project(tmp_path, n=5):
+    p = review_project(tmp_path)
+    ep = make_episode(n)
+    ep.video_path = str(tmp_path / "EP01.mkv")
+    ep.characters = p.episode.characters
+    for c in ep.cues:
+        c.thai, c.status, c.speaker, c.speaker_conf = f"ไทย {c.id}", "translated", "yuki", 0.9
+    for i in (2, 3, 5):
+        ep.cues[i - 1].thai, ep.cues[i - 1].status = None, "failed"
+    ep.cues[3].skip, ep.cues[3].thai = True, None          # skipped lines are never "missing"
+    return Project(episode=ep, backend="api", model="claude-opus-5-5", stage="done")
+
+
+def test_review_export_warns_about_untranslated_cues(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    asked, exported = [], []
+    answer = {"v": rp.QMessageBox.No}
+    monkeypatch.setattr(rp.QMessageBox, "question",
+                        staticmethod(lambda parent, title, text, *a, **k: asked.append(text) or answer["v"]))
+    monkeypatch.setattr(rp.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(rp, "export_project", lambda proj, s, overwrite=False: exported.append(1) or ("a", "b"))
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(_failed_project(tmp_path))
+    page.export()
+    assert asked == ["มี 3 บรรทัดที่ยังไม่ได้แปล จะใส่ข้อความต้นฉบับแทน — ส่งออกต่อไหม?"]
+    assert exported == []
+    answer["v"] = rp.QMessageBox.Yes
+    page.export()
+    assert exported == [1]
+    page.load(review_project(tmp_path))                      # nothing missing: no question
+    asked.clear()
+    page.export()
+    assert asked == [] and len(exported) == 2
+
+
+def test_queue_export_all_asks_once_with_total(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import queue_page as qp
+    page = _page_with_item(qtbot, tmp_path, monkeypatch)
+    a, b = _failed_project(tmp_path), _failed_project(tmp_path)
+    page.items.append(page.items[0].__class__(video=tmp_path / "EP02.mkv", source=tmp_path / "EP02.srt"))
+    page.items[0].project, page.items[1].project = a, b
+    asked, exported = [], []
+    monkeypatch.setattr(qp.QMessageBox, "question",
+                        staticmethod(lambda parent, title, text, *a, **k: asked.append(text) or qp.QMessageBox.No))
+    monkeypatch.setattr(qp, "export_project", lambda proj, s, overwrite=False: exported.append(proj))
+    page.export_all()
+    assert asked == ["มี 6 บรรทัดที่ยังไม่ได้แปล จะใส่ข้อความต้นฉบับแทน — ส่งออกต่อไหม?"]
+    assert exported == []
+    monkeypatch.setattr(qp.QMessageBox, "question", staticmethod(lambda *a, **k: qp.QMessageBox.Yes))
+    page.cards = [type("C", (), {"update_from": lambda self, it: None})()] * 2
+    page.export_all()
+    assert exported == [a, b]
+
+
+def test_review_retranslate_all_failed_batches_and_saves(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    batches = []
+    backend = _fake_translator(batches)
+    monkeypatch.setattr(rp, "make_backend", lambda s: backend)
+    s = Settings(chunk_size=2)
+    page = ReviewPage(s, lambda: None)
+    qtbot.addWidget(page)
+    p = _failed_project(tmp_path)
+    page.load(p)
+    page.set_filter("failed")
+    assert page.table.rowCount() == 3
+    page.retranslate_failed()
+    first = page._worker
+    assert not page.retry_failed_btn.isEnabled() and not page.retranslate_btn.isEnabled()
+    page.retranslate_failed()                      # ignored while running
+    assert page._worker is first
+    qtbot.waitUntil(lambda: page.retry_failed_btn.isEnabled(), timeout=5000)
+    first.wait()
+    assert batches == [[2, 3], [5]]                # chunk-sized groups, skip cue excluded
+    assert [p.episode.cue(i).thai for i in (2, 3, 5)] == ["ใหม่ 2", "ใหม่ 3", "ใหม่ 5"]
+    assert p.episode.cue(4).thai is None
+    assert p.cost_usd == pytest.approx(0.02)
+    assert (tmp_path / "EP01.stproj.json").exists()
+    assert page.retry_failed_btn.text() == "แปลบรรทัดที่ล้มเหลวใหม่ทั้งหมด"
+    assert page.table.rowCount() == 0              # failed filter refreshed
+
+
+def test_review_retranslate_all_reports_error_and_keeps_progress(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from fakes import FakeBackend
+    from subtitle_translator.ai.backend import AIError, AIErrorKind
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    batches = []
+    ok = _fake_translator(batches).responses[0]
+    backend = FakeBackend([ok, AIError(AIErrorKind.NETWORK, "เชื่อมต่อไม่ได้")])
+    monkeypatch.setattr(rp, "make_backend", lambda s: backend)
+    warned = []
+    monkeypatch.setattr(rp.QMessageBox, "warning", staticmethod(lambda p, t, text, *a, **k: warned.append(text)))
+    page = ReviewPage(Settings(chunk_size=2), lambda: None)
+    qtbot.addWidget(page)
+    p = _failed_project(tmp_path)
+    page.load(p)
+    page.retranslate_failed()
+    qtbot.waitUntil(lambda: page.retry_failed_btn.isEnabled(), timeout=5000)
+    page._worker.wait()
+    assert warned == ["เชื่อมต่อไม่ได้"]
+    assert p.episode.cue(2).thai == "ใหม่ 2" and p.episode.cue(5).thai is None
+    assert (tmp_path / "EP01.stproj.json").exists()
+
+
+def test_character_color_double_click(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from PySide6.QtGui import QColor
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    p = review_project(tmp_path)
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(p)
+    page.select(1)
+    picked = {"c": QColor("#12abef")}
+    monkeypatch.setattr(rp.QColorDialog, "getColor", staticmethod(lambda *a, **k: picked["c"]))
+    page.chars.itemDoubleClicked.emit(page.chars.item(0))
+    assert p.episode.character("yuki").color == "#12ABEF"
+    assert (tmp_path / "EP01.stproj.json").exists()
+    assert page.chars.item(0).foreground().color().name().upper() == "#12ABEF"
+    assert page.timeline.colors["yuki"] == "#12ABEF"
+    assert page.current == 1 and page.timeline.selected == 1
+    picked["c"] = QColor()                                   # cancelled dialog: invalid colour
+    page.chars.itemDoubleClicked.emit(page.chars.item(0))
+    assert p.episode.character("yuki").color == "#12ABEF"
+    page.chars.itemDoubleClicked.emit(page.chars.item(page.chars.count() - 1))   # "unknown" row: ignored
+    assert p.episode.character("yuki").color == "#12ABEF"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QSizeF, Qt, QTimer, QUrl
@@ -8,19 +9,19 @@ from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPen, QPixmap, QS
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QFrame, QGraphicsPixmapItem, QGraphicsScene,
+    QAbstractItemView, QButtonGroup, QColorDialog, QComboBox, QFrame, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..ai.factory import make_backend
 from ..core.media import MediaError, grab_frame
-from ..core.models import Cue, Project
+from ..core.models import Cue, Project, untranslated_ids
 from ..core.project_store import save_project
 from ..core.settings import Settings, cache_dir
 from ..export import export_project
 from ..translate.analyze import UNKNOWN_COLOR
-from ..translate.translate import translate_chunk
+from ..translate.translate import make_chunks, translate_chunk
 from .theme import COLORS
 from .timeline_widget import TimelineWidget
 from .worker import CallWorker
@@ -28,6 +29,8 @@ from .worker import CallWorker
 log = logging.getLogger(__name__)
 UNSURE_THRESHOLD = 0.6
 CPS_LIMIT = 17
+RETRY_ALL_TEXT = "แปลบรรทัดที่ล้มเหลวใหม่ทั้งหมด"
+_HEX_COLOR = re.compile(r"#[0-9A-F]{6}")
 
 
 def cps(cue: Cue, text: str) -> float:
@@ -199,6 +202,9 @@ class ReviewPage(QWidget):
         self.search = QLineEdit(placeholderText="ค้นหาคำ…")
         self.search.textChanged.connect(lambda _: self._fill_table())
         head.addWidget(self.search)
+        self.retry_failed_btn = QPushButton(RETRY_ALL_TEXT)
+        self.retry_failed_btn.clicked.connect(self.retranslate_failed)
+        head.addWidget(self.retry_failed_btn)
         export = QPushButton("ส่งออก .srt + .ass")
         export.setProperty("accent", True)
         export.clicked.connect(self.export)
@@ -219,6 +225,8 @@ class ReviewPage(QWidget):
         h.setProperty("role", "h2")
         cl.addWidget(h)
         self.chars = QListWidget()
+        self.chars.setToolTip("ดับเบิลคลิกเพื่อเปลี่ยนสีตัวละคร")
+        self.chars.itemDoubleClicked.connect(self.edit_character_color)
         cl.addWidget(self.chars)
         left.addWidget(chars_card, 2)
         body.addLayout(left, 2)
@@ -295,13 +303,7 @@ class ReviewPage(QWidget):
         lang = {"ja": "ญี่ปุ่น", "en": "อังกฤษ"}.get(ep.src_lang, ep.src_lang)
         self.subtitle.setText(f"{lang} → ไทย · {len(ep.cues)} บรรทัด · {project.model} · ใช้ไป ${project.cost_usd:.2f}")
         names, colors = self._names(), self._colors()
-        self.chars.clear()
-        for key, name in names.items():
-            count = sum(1 for c in ep.cues if c.speaker == key and not c.skip)
-            ch = ep.character(key)
-            info = f"{ch.gender} · {ch.role}" if ch else "ยังระบุคนพูดไม่ได้"
-            self.chars.addItem(f"● {name} — {info} · {count} บรรทัด")
-            self.chars.item(self.chars.count() - 1).setForeground(QColor(colors[key]))
+        self._fill_chars()
         self.speaker_box.clear()
         for key, name in names.items():
             self.speaker_box.addItem(name, key)
@@ -311,6 +313,45 @@ class ReviewPage(QWidget):
         self.mode = "all"
         self._update_counts()
         self._fill_table()
+
+    def _fill_chars(self) -> None:
+        ep = self.project.episode
+        names, colors = self._names(), self._colors()
+        self.chars.clear()
+        for key, name in names.items():
+            count = sum(1 for c in ep.cues if c.speaker == key and not c.skip)
+            ch = ep.character(key)
+            info = f"{ch.gender} · {ch.role}" if ch else "ยังระบุคนพูดไม่ได้"
+            self.chars.addItem(f"● {name} — {info} · {count} บรรทัด")
+            item = self.chars.item(self.chars.count() - 1)
+            item.setForeground(QColor(colors[key]))
+            item.setData(Qt.UserRole, key)
+
+    def edit_character_color(self, item) -> None:
+        if not self.project:
+            return
+        ch = self.project.episode.character(item.data(Qt.UserRole))
+        if ch is None:                       # the "unknown speaker" row has no colour of its own
+            return
+        picked = QColorDialog.getColor(QColor(ch.color), self, "เลือกสีตัวละคร")
+        if not picked.isValid():
+            return
+        hex_color = picked.name().upper()
+        if not _HEX_COLOR.fullmatch(hex_color):
+            return
+        ch.color = hex_color
+        save_project(self.project)
+        self._refresh_after_color_change()
+
+    def _refresh_after_color_change(self) -> None:
+        ep = self.project.episode
+        self._fill_chars()
+        self.timeline.set_data(ep.cues, self._colors(), self._names())
+        self.timeline.set_selected(self.current)
+        current = self.current
+        self._fill_table()
+        if current is not None:
+            self.select(current)
 
     def _update_counts(self) -> None:
         cues = self.project.episode.cues
@@ -404,6 +445,62 @@ class ReviewPage(QWidget):
             ok = ok and not self._worker.isRunning()
         return ok
 
+    def _set_translating(self, busy: bool) -> None:
+        self.retranslate_btn.setEnabled(not busy)
+        self.retry_failed_btn.setEnabled(not busy)
+
+    def retranslate_failed(self) -> None:
+        """Retry every cue that has no Thai text, in chunk-sized batches, in one background job."""
+        if not self.project:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        project = self.project
+        ep = project.episode
+        ids = set(untranslated_ids(ep.cues))
+        if not ids:
+            return
+        chunks = make_chunks([c for c in ep.cues if c.id in ids], max(1, self.s.chunk_size))
+        self._set_translating(True)
+        self.retry_failed_btn.setText("กำลังแปล…")
+
+        def job():
+            backend = make_backend(self.s)
+            cost, error = 0.0, None
+            for chunk in chunks:
+                try:
+                    cost += translate_chunk(ep, chunk, backend, self.s.effort_translate)
+                except Exception as exc:         # keep what earlier chunks produced, report this one
+                    error = exc
+                    break
+            return cost, error
+
+        def finish(result=None, error=None):
+            if self._worker is not None:
+                self._worker.wait()
+            self._set_translating(False)
+            self.retry_failed_btn.setText(RETRY_ALL_TEXT)
+            if error is None:
+                cost, error = result
+                project.cost_usd += cost
+            try:
+                save_project(project)
+            except (ValueError, OSError) as exc:
+                log.warning("save failed after bulk retry: %s", exc)
+                QMessageBox.warning(self, "บันทึกไม่สำเร็จ", str(exc))
+            if self.project is project:
+                self._update_counts()
+                self._fill_table()
+                if self.current is not None:
+                    self.select(self.current)
+            if error is not None:
+                QMessageBox.warning(self, "แปลไม่สำเร็จ", str(error))
+
+        self._worker = CallWorker(job)
+        self._worker.done.connect(lambda r: finish(result=r))
+        self._worker.failed.connect(lambda e: finish(error=e))
+        self._worker.start()
+
     def retranslate(self) -> None:
         if self.current is None or not self.project:
             return
@@ -411,7 +508,7 @@ class ReviewPage(QWidget):
             return
         project = self.project
         cue_id, ep = self.current, project.episode
-        self.retranslate_btn.setEnabled(False)
+        self._set_translating(True)
         self.retranslate_btn.setText("กำลังแปล…")
 
         def job():
@@ -421,7 +518,7 @@ class ReviewPage(QWidget):
         def finish(result=None, error=None):
             if self._worker is not None:
                 self._worker.wait()
-            self.retranslate_btn.setEnabled(True)
+            self._set_translating(False)
             self.retranslate_btn.setText("แปลบรรทัดนี้ใหม่")
             if error is not None:
                 QMessageBox.warning(self, "แปลไม่สำเร็จ", str(error))
@@ -439,6 +536,11 @@ class ReviewPage(QWidget):
 
     def export(self) -> None:
         if not self.project:
+            return
+        missing = len(untranslated_ids(self.project.episode.cues))
+        if missing and QMessageBox.question(
+                self, "ยังมีบรรทัดที่ไม่ได้แปล",
+                f"มี {missing} บรรทัดที่ยังไม่ได้แปล จะใส่ข้อความต้นฉบับแทน — ส่งออกต่อไหม?") != QMessageBox.Yes:
             return
         try:
             try:
