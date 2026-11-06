@@ -52,3 +52,7 @@ def test_api_key_uses_keyring():
     assert st.get_api_key() == "sk-ant-test"
     st.clear_api_key()
     assert st.get_api_key() is None
+
+
+def test_conftest_installs_in_memory_keyring():
+    assert type(keyring.get_keyring()).__name__ == "_MemoryKeyring"

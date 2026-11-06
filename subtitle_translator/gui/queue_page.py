@@ -69,7 +69,7 @@ class QueueRunner(QThread):
     def __init__(self, jobs: list[tuple[int, QueueItem]], settings: Settings, parent=None):
         super().__init__(parent)
         self.jobs = jobs
-        self.settings = settings
+        self.settings = replace(settings)      # snapshot: settings edited mid-run must not leak in
         self._stop = False
 
     def stop(self) -> None:

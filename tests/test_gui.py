@@ -430,3 +430,11 @@ def test_main_window_close_waits_for_threads(qtbot, tmp_path, monkeypatch, no_re
     w.closeEvent(ev)
     assert not ev.isAccepted()
     del w.queue_page.shutdown          # back to the real method for the teardown join
+
+
+def test_queue_runner_snapshots_settings(tmp_path):
+    from subtitle_translator.gui.queue_page import QueueRunner
+    s = Settings(model="claude-opus-5-5")
+    r = QueueRunner([], s)
+    s.model = "claude-haiku-5-5"
+    assert r.settings.model == "claude-opus-5-5" and r.settings is not s
