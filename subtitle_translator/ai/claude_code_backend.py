@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import atexit
 import subprocess
 import tempfile
 from pathlib import Path
@@ -17,6 +18,24 @@ _LIMIT = re.compile(r"usage limit|rate limit|limit reached|out of extra usage", 
 _RESET = re.compile(r"resets?\s+(?:at\s+)?(.+?)(?:\.\s|\.$|$)", re.I | re.M)
 # "failed to authenticate / OAuth session expired" is the real CLI wording when the Max login lapses.
 _LOGIN = re.compile(r"/login|log ?in|not authenticated|invalid api key|failed to authenticate|oauth|session expired", re.I)
+
+
+_WORKDIR: str | None = None
+
+
+def _shared_workdir() -> str:
+    """One lazily-created scratch dir for every backend instance (keeps project CLAUDE.md out)."""
+    global _WORKDIR
+    if _WORKDIR is None or not os.path.isdir(_WORKDIR):
+        _WORKDIR = tempfile.mkdtemp(prefix="subtrans-cc-")
+        atexit.register(shutil.rmtree, _WORKDIR, True)
+    return _WORKDIR
+
+
+# The CLI reads untrusted subtitle text, so run it with no tools, no MCP servers, no skills and
+# no transcript on disk. (--bare is NOT used: it disables the Max OAuth login.)
+SAFETY_FLAGS = ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                "--no-session-persistence", "--permission-prompts", "none"]
 
 
 def find_claude() -> str | None:
@@ -37,7 +56,10 @@ class ClaudeCodeBackend:
         self.model = model
         self.exe = exe
         self.runner = runner
-        self.workdir = tempfile.mkdtemp(prefix="subtrans-cc-")   # keeps project CLAUDE.md files out
+
+    @property
+    def workdir(self) -> str:
+        return _shared_workdir()
 
     def _prompt(self, req: AIRequest, error_note: str | None = None) -> str:
         parts = [req.system, req.context, req.task,
@@ -51,7 +73,8 @@ class ClaudeCodeBackend:
         exe = self.exe or find_claude()
         if not exe:
             raise AIError(AIErrorKind.NOT_INSTALLED, "ไม่พบ Claude Code — ติดตั้งแล้วล็อกอินด้วยบัญชี Max ก่อน")
-        args = [exe, "-p", "--output-format", "json", "--model", MODEL_ALIAS.get(self.model, "opus")]
+        args = [exe, "-p", "--output-format", "json", "--model", MODEL_ALIAS.get(self.model, "opus"),
+                *SAFETY_FLAGS]
         try:
             r = self.runner(args, input=prompt.encode("utf-8"), capture_output=True,
                             timeout=600, cwd=self.workdir, **no_window())
@@ -69,6 +92,8 @@ class ClaudeCodeBackend:
         is_error = r.returncode != 0 or (isinstance(outer, dict) and bool(outer.get("is_error")))
         if is_error:
             blob = f"{result}\n{err}"
+            if re.search(r"unknown option|unrecognized option|unknown argument", err, re.I):
+                raise AIError(AIErrorKind.NOT_INSTALLED, "อัปเดต Claude Code เป็นเวอร์ชันล่าสุด")
             if _LIMIT.search(blob):
                 m = _RESET.search(blob)
                 raise AIError(AIErrorKind.QUOTA, "โควตา Claude Max เต็ม",

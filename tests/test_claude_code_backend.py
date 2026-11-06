@@ -36,6 +36,9 @@ def test_success_with_code_fence_and_prompt_shape():
     assert res.data == {"ok": True} and res.cost_usd is None
     args, kw = runner.calls[0]
     assert args[:6] == ["claude", "-p", "--output-format", "json", "--model", "opus"]
+    assert args[6:] == ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                        "--no-session-persistence", "--permission-prompts", "none"]
+    assert "--bare" not in args
     prompt = kw["input"].decode("utf-8")
     assert prompt.index("SYS") < prompt.index("CTX") < prompt.index("TASK")
     assert '"required": ["ok"]' in prompt
@@ -101,3 +104,25 @@ def test_factory_picks_backend(monkeypatch):
     assert e.value.kind is AIErrorKind.AUTH
     monkeypatch.setattr(factory, "get_api_key", lambda: "k")
     assert isinstance(factory.make_backend(Settings(backend="api")), ApiBackend)
+
+
+def test_unknown_option_maps_to_update_message():
+    runner = Runner(subprocess.CompletedProcess(args=[], returncode=1, stdout=b"",
+                                                stderr=b"error: unknown option '--permission-prompts'"))
+    with pytest.raises(Exception) as e:
+        ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=runner).run_json(REQ)
+    assert e.value.kind is AIErrorKind.NOT_INSTALLED
+    assert "อัปเดต Claude Code" in str(e.value)
+
+
+def test_empty_tools_arg_is_quoted_on_windows_command_line():
+    runner = Runner(proc('{"ok": true}'))
+    ClaudeCodeBackend("claude-opus-5-5", exe="claude.cmd", runner=runner).run_json(REQ)
+    line = subprocess.list2cmdline(runner.calls[0][0])
+    assert '--tools "" --strict-mcp-config' in line
+
+
+def test_workdir_is_shared_between_instances():
+    a = ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=Runner())
+    b = ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=Runner())
+    assert a.workdir == b.workdir
