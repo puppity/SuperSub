@@ -332,8 +332,8 @@ class QueuePage(QWidget):
         self._kick_probe()
 
     def _kick_probe(self) -> None:
-        if self._closing or (self.prober is not None and self.prober.isRunning()):
-            return                      # queued paths start when the current probe ends
+        if self._closing or self.prober is not None:
+            return                      # queued paths start when the current probe's finished handler runs
         jobs, self._probe_queue = self._probe_queue, []
         if not jobs:
             return
@@ -370,7 +370,7 @@ class QueuePage(QWidget):
         rows, self._new_rows = self._new_rows, []
         if rows and self.s.backend == "api":
             self._estimate_rows(rows)
-        running = bool(self.runner and self.runner.isRunning())
+        running = self.runner is not None
         self.start_btn.setEnabled(not running)
         if not running:
             self.message.setText(self._idle_message)
@@ -406,9 +406,10 @@ class QueuePage(QWidget):
 
     def _busy(self) -> bool:
         """True while a background thread holds row indices (rows must not move)."""
-        return bool((self.runner and self.runner.isRunning())
-                    or (self.estimator and self.estimator.isRunning()) or self._est_queue
-                    or (self.prober and self.prober.isRunning()) or self._probe_queue)
+        # A thread counts as busy until its finished handler has cleared it, not merely until
+        # isRunning() turns False: results queued by the thread are delivered before that handler.
+        return bool(self.runner is not None or self.estimator is not None or self._est_queue
+                    or self.prober is not None or self._probe_queue)
 
     # ----- settings shortcuts -----
     def _backend_changed(self, index: int) -> None:
@@ -439,9 +440,9 @@ class QueuePage(QWidget):
         self._kick_estimator()
 
     def _kick_estimator(self) -> None:
-        if self._closing or (self.estimator is not None and self.estimator.isRunning()):
+        if self._closing or self.estimator is not None:
             return                      # rows stay queued; started on finish
-        if self.runner is not None and self.runner.isRunning():
+        if self.runner is not None:
             return                      # never estimate while a run may write the same project files
         rows, self._est_queue = self._est_queue, []
         if not rows:
@@ -476,12 +477,12 @@ class QueuePage(QWidget):
     def start(self) -> None:
         jobs = [(r, it) for r, it in enumerate(self.items)
                 if it.source is not None and not (it.project and it.project.stage == "done")]
-        if not jobs or self._closing or (self.runner is not None and self.runner.isRunning()):
+        if not jobs or self._closing or self.runner is not None:
             return
-        if (self.prober and self.prober.isRunning()) or self._probe_queue:
+        if self.prober is not None or self._probe_queue:
             self.message.setText("กำลังตรวจแทร็กซับ รอสักครู่…")
             return
-        if self.estimator is not None and self.estimator.isRunning():
+        if self.estimator is not None:
             self.message.setText("กำลังประมาณราคา รอสักครู่…")
             return
         runner = QueueRunner(jobs, self.s)

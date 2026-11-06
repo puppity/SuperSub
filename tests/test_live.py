@@ -21,18 +21,22 @@ def live_episode():
     return ep
 
 
-def backends():
-    out = []
-    if get_api_key():
-        out.append(ApiBackend(get_api_key(), "claude-opus-5-5"))
-    if find_claude():
-        out.append(ClaudeCodeBackend("claude-sonnet-5-5"))
-    return out
+def make_live_backend(name):
+    """Built lazily inside the test, so collection never touches the keyring or PATH."""
+    if name == "api":
+        key = get_api_key()
+        if not key:
+            pytest.skip("no API key stored")
+        return ApiBackend(key, "claude-opus-5-5")
+    if not find_claude():
+        pytest.skip("claude CLI not found")
+    return ClaudeCodeBackend("claude-sonnet-5-5")
 
 
 @pytest.mark.live
-@pytest.mark.parametrize("backend", backends(), ids=lambda b: b.name)
-def test_live_translation(backend):
+@pytest.mark.parametrize("backend_name", ["api", "claude_code"])
+def test_live_translation(backend_name):
+    backend = make_live_backend(backend_name)
     ep = live_episode()
     analyze(ep, backend, "high")
     translate_chunk(ep, [c.id for c in ep.cues], backend, "medium")

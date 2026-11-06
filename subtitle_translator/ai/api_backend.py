@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import logging
 
-import anthropic
-
 from ..core.pricing import MODELS, cost_usd
 from .backend import AIError, AIErrorKind, AIRequest, AIResult, Usage, validate_json
 
@@ -33,7 +31,10 @@ class ApiBackend:
 
     def __init__(self, api_key: str, model: str, client=None):
         self.model = model
-        self.client = client or anthropic.Anthropic(api_key=api_key, max_retries=4)
+        if client is None:
+            import anthropic        # lazy: the SDK costs seconds to import and the GUI imports this module
+            client = anthropic.Anthropic(api_key=api_key, max_retries=4)
+        self.client = client
 
     def _send(self, params: dict):
         if self.model in FALLBACK_MODELS:
@@ -43,6 +44,7 @@ class ApiBackend:
             return s.get_final_message()
 
     def run_json(self, req: AIRequest) -> AIResult:
+        import anthropic
         try:
             msg = self._send(build_params(self.model, req))
         except anthropic.AuthenticationError as exc:
@@ -91,6 +93,7 @@ class ApiBackend:
         return cost_usd(self.model, total_in, expected_output_tokens)
 
     def check(self) -> str:
+        import anthropic
         try:
             self.client.models.retrieve(self.model)
         except anthropic.AuthenticationError as exc:

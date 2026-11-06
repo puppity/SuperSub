@@ -36,6 +36,22 @@ from subtitle_translator.gui import settings_page as sp
 from subtitle_translator.gui.settings_page import SettingsPage
 
 
+@pytest.fixture(autouse=True)
+def join_gui_threads(qtbot, monkeypatch):
+    """Every page built by a test is shut down (and its threads joined) at teardown."""
+    from subtitle_translator.gui import queue_page as qp, review_page as rp
+    made = []
+    for cls in (qp.QueuePage, rp.ReviewPage, rp.VideoPreview):
+        orig = cls.__init__
+
+        def init(self, *a, _orig=orig, **k):
+            _orig(self, *a, **k)
+            made.append(self)
+        monkeypatch.setattr(cls, "__init__", init)
+    yield
+    assert all([p.shutdown(5000) for p in made]), "a GUI thread was still running at teardown"
+
+
 class FakeApi:
     def __init__(self, key, model):
         pass
@@ -413,3 +429,4 @@ def test_main_window_close_waits_for_threads(qtbot, tmp_path, monkeypatch, no_re
     ev = QCloseEvent()
     w.closeEvent(ev)
     assert not ev.isAccepted()
+    del w.queue_page.shutdown          # back to the real method for the teardown join

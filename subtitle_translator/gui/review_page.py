@@ -105,7 +105,7 @@ class VideoPreview(QGraphicsView):
         self._layout()
 
     def _start_grab(self) -> None:
-        if self._grab is not None and self._grab.isRunning():
+        if self._grab is not None:
             return                      # the finish handler re-runs with the latest request
         if self._want is None:
             return
