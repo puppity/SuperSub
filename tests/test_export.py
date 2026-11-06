@@ -63,3 +63,62 @@ def test_export_project_paths_and_overwrite(tmp_path):
         export_project(p, Settings())
     export_project(p, Settings(), overwrite=True)
     assert output_paths(ep.video_path, str(tmp_path / "out"))[0] == tmp_path / "out" / "EP01.th.srt"
+
+
+ORIG = """[Script Info]
+ScriptType: v4.00+
+PlayResX: {res_x}
+PlayResY: 1080.0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Hello
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{{\\k20}}la
+"""
+
+
+def _orig_with_effect(tmp_path, res_x="1920"):
+    src = tmp_path / "orig.ass"
+    src.write_text(ORIG.format(res_x=res_x), encoding="utf-8")
+    cues, _ = load_cues(src)
+    ep = make_episode(1)
+    ep.source, ep.cues = str(src), cues
+    cues[0].thai = "สวัสดี"
+    return ep
+
+
+def test_effect_line_on_default_style_keeps_original_font(tmp_path):
+    ep = _orig_with_effect(tmp_path)
+    out = write_ass(ep, tmp_path / "x.th.ass", "Leelawadee UI", 52)
+    subs = pysubs2.load(str(out), encoding="utf-8-sig")
+    effect = next(e for e in subs.events if "\\k20" in e.text)
+    assert subs.styles[effect.style].fontname == "Arial"
+    assert subs.styles["Default"].fontname == "Leelawadee UI"
+    assert effect.style != "Default"
+    thai = next(e for e in subs.events if e.text == "สวัสดี")
+    assert thai.style == "Default"
+
+
+def test_non_integer_playres_keeps_effect_lines(tmp_path):
+    ep = _orig_with_effect(tmp_path, res_x="1080.0")
+    out = write_ass(ep, tmp_path / "x.th.ass", "Leelawadee UI", 52)
+    subs = pysubs2.load(str(out), encoding="utf-8-sig")
+    assert any("\\k20" in e.text for e in subs.events)
+    assert subs.info["PlayResX"] == "1080"
+
+
+def test_export_refuses_to_overwrite_source_subtitle(tmp_path):
+    src = tmp_path / "EP01.th.srt"
+    src.write_text("1\n00:00:01,000 --> 00:00:02,000\nkeep me\n", encoding="utf-8")
+    ep = make_episode(1)
+    ep.video_path = str(tmp_path / "EP01.mkv")
+    ep.source = str(src)
+    ep.cues[0].thai = "ไทย"
+    p = Project(episode=ep, backend="api", model="claude-opus-5-5")
+    with pytest.raises(ValueError):
+        export_project(p, Settings(), overwrite=True)
+    assert src.read_text(encoding="utf-8") == "1\n00:00:01,000 --> 00:00:02,000\nkeep me\n"

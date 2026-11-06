@@ -25,8 +25,8 @@ def write_ass(ep: Episode, path: str | Path, font: str, size: int) -> Path:
     if Path(ep.source).suffix.lower() in (".ass", ".ssa") and Path(ep.source).exists():
         try:
             original = load_ssa(ep.source)
-            res_x = int(original.info.get("PlayResX", res_x))
-            res_y = int(original.info.get("PlayResY", res_y))
+            res_x = int(float(original.info.get("PlayResX", res_x)))
+            res_y = int(float(original.info.get("PlayResY", res_y)))
         except (SubtitleReadError, ValueError):
             original = None
     subs.info["PlayResX"], subs.info["PlayResY"] = str(res_x), str(res_y)
@@ -53,10 +53,19 @@ def write_ass(ep: Episode, path: str | Path, font: str, size: int) -> Path:
         ))
     if original is not None:
         for ev in original.events:
-            if not ev.is_comment and is_effect(ev):
-                if ev.style in original.styles and ev.style not in subs.styles:
-                    subs.styles[ev.style] = original.styles[ev.style]
-                subs.events.append(ev.copy())
+            if ev.is_comment or not is_effect(ev):
+                continue
+            copied = ev.copy()
+            if ev.style in subs.styles:
+                # The output's own style (e.g. Default = Thai font) must not change the
+                # look of an original effect line: keep the original style under a new name.
+                name = "Orig_" + ev.style
+                if name not in subs.styles:
+                    subs.styles[name] = original.styles.get(ev.style, pysubs2.SSAStyle()).copy()
+                copied.style = name
+            elif ev.style in original.styles:
+                subs.styles[ev.style] = original.styles[ev.style].copy()
+            subs.events.append(copied)
         subs.sort()
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
