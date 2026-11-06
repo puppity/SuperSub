@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal
@@ -101,13 +101,43 @@ class QueueRunner(QThread):
                 self.item_failed.emit(row, f"ผิดพลาดที่ไม่คาดคิด: {exc}")
 
 
+class ProbeRunner(QThread):
+    """Runs ffprobe for a list of videos off the GUI thread."""
+    probed = Signal(object, object, str)       # video, tracks | None, error
+
+    def __init__(self, jobs: list[Path], parent=None):
+        super().__init__(parent)
+        self.jobs = jobs
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        for video in self.jobs:
+            if self._stop:
+                return
+            try:
+                self.probed.emit(video, list_sub_tracks(video), "")
+            except MediaError as exc:
+                self.probed.emit(video, None, str(exc))
+            except Exception as exc:
+                log.exception("probe failed for %s", video)
+                self.probed.emit(video, None, f"ผิดพลาดที่ไม่คาดคิด: {exc}")
+
+
 class EstimateRunner(QThread):
     estimated = Signal(int, object)
 
     def __init__(self, jobs: list[tuple[int, QueueItem]], settings: Settings, parent=None):
         super().__init__(parent)
         self.jobs = jobs
-        self.settings = settings
+        self.settings = replace(settings)      # snapshot: model changes must not leak in mid-run
+        self.model = self.settings.model
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
 
     def run(self) -> None:
         try:
@@ -118,6 +148,8 @@ class EstimateRunner(QThread):
                 self.estimated.emit(row, None)
             return
         for row, item in self.jobs:
+            if self._stop:
+                return
             try:
                 project = prepare_project(item.video, item.source, self.settings, cache_dir())
                 self.estimated.emit(row, estimate_project_cost(project, backend))
@@ -182,6 +214,10 @@ class QueuePage(QWidget):
         self.runner: QueueRunner | None = None
         self.estimator: EstimateRunner | None = None
         self._est_queue: list[int] = []
+        self.prober: ProbeRunner | None = None
+        self._probe_queue: list[Path] = []
+        self._new_rows: list[int] = []
+        self._closing = False
         self._paused = False
         self.setAcceptDrops(True)
 
@@ -252,6 +288,7 @@ class QueuePage(QWidget):
         for b in (self.start_btn, self.stop_btn, export_all):
             sl.addWidget(b)
         self.message = QLabel("หยุดได้ทุกเมื่อ ผลที่เสร็จแล้วบันทึกไว้ กลับมาทำต่อไม่เสียเงินซ้ำ")
+        self._idle_message = self.message.text()
         self.message.setWordWrap(True)
         self.message.setProperty("role", "muted")
         sl.addWidget(self.message)
@@ -277,30 +314,66 @@ class QueuePage(QWidget):
             self.add_paths([Path(folder)])
 
     def add_paths(self, paths: list[Path]) -> None:
+        if self._closing:
+            return
         videos: list[Path] = []
         for p in paths:
             if p.is_dir():
                 videos += sorted(x for x in p.rglob("*") if x.suffix.lower() in VIDEO_EXT)
             elif p.suffix.lower() in VIDEO_EXT:
                 videos.append(p)
-        known = {i.video for i in self.items}
-        new_rows = []
+        known = {i.video for i in self.items} | set(self._probe_queue)
+        if self.prober is not None:
+            known |= set(self.prober.jobs)
         for v in videos:
-            if v in known:
-                continue
-            try:
-                tracks = list_sub_tracks(v)
-            except MediaError as exc:
-                self._append(QueueItem(video=v, status="ผิดพลาด", error=str(exc)))
-                continue
+            if v not in known:
+                known.add(v)
+                self._probe_queue.append(v)
+        self._kick_probe()
+
+    def _kick_probe(self) -> None:
+        if self._closing or (self.prober is not None and self.prober.isRunning()):
+            return                      # queued paths start when the current probe ends
+        jobs, self._probe_queue = self._probe_queue, []
+        if not jobs:
+            return
+        probe = ProbeRunner(jobs)
+        probe.probed.connect(self._on_probed)
+        probe.finished.connect(self._on_probe_finished)
+        self.prober = probe
+        self.start_btn.setEnabled(False)
+        self.message.setText("กำลังตรวจแทร็กซับ…")
+        probe.start()
+
+    def _on_probed(self, v: Path, tracks, error: str) -> None:
+        try:
+            if tracks is None:
+                self._append(QueueItem(video=v, status="ผิดพลาด", error=error))
+                return
             source, cands, meta = describe_source(v, tracks, sidecar_subs(v), self.s.prefer_langs)
             item = QueueItem(video=v, source=source, meta=meta,
                              status="รอคิว" if source is not None else "ข้าม")
             self._append(item, cands)
             if item.source is not None:
-                new_rows.append(len(self.items) - 1)
-        if new_rows and self.s.backend == "api":
-            self._estimate_rows(new_rows)
+                self._new_rows.append(len(self.items) - 1)
+        except Exception as exc:        # a bad file must never take the GUI down
+            log.exception("could not add %s", v)
+            self._append(QueueItem(video=v, status="ผิดพลาด", error=f"ผิดพลาดที่ไม่คาดคิด: {exc}"))
+
+    def _on_probe_finished(self) -> None:
+        if self.prober is not None:
+            self.prober.wait()
+            self.prober = None
+        self._kick_probe()
+        if self.prober is not None:
+            return
+        rows, self._new_rows = self._new_rows, []
+        if rows and self.s.backend == "api":
+            self._estimate_rows(rows)
+        running = bool(self.runner and self.runner.isRunning())
+        self.start_btn.setEnabled(not running)
+        if not running:
+            self.message.setText(self._idle_message)
         self._refresh_total()
 
     def _append(self, item: QueueItem, cands: list[SubTrack] | None = None) -> None:
@@ -334,7 +407,8 @@ class QueuePage(QWidget):
     def _busy(self) -> bool:
         """True while a background thread holds row indices (rows must not move)."""
         return bool((self.runner and self.runner.isRunning())
-                    or (self.estimator and self.estimator.isRunning()) or self._est_queue)
+                    or (self.estimator and self.estimator.isRunning()) or self._est_queue
+                    or (self.prober and self.prober.isRunning()) or self._probe_queue)
 
     # ----- settings shortcuts -----
     def _backend_changed(self, index: int) -> None:
@@ -347,7 +421,11 @@ class QueuePage(QWidget):
         self._persist()
         for it in self.items:
             it.estimate = None
+        for card, it in zip(self.cards, self.items):
+            card.update_from(it)
         self._refresh_total()
+        if self.s.backend == "api":
+            self.estimate()
 
     # ----- estimate -----
     def estimate(self) -> None:
@@ -361,13 +439,15 @@ class QueuePage(QWidget):
         self._kick_estimator()
 
     def _kick_estimator(self) -> None:
-        if self.estimator is not None and self.estimator.isRunning():
+        if self._closing or (self.estimator is not None and self.estimator.isRunning()):
             return                      # rows stay queued; started on finish
+        if self.runner is not None and self.runner.isRunning():
+            return                      # never estimate while a run may write the same project files
         rows, self._est_queue = self._est_queue, []
         if not rows:
             return
         est = EstimateRunner([(r, self.items[r]) for r in rows], self.s)
-        est.estimated.connect(self._on_estimated)
+        est.estimated.connect(lambda r, v, m=est.model: self._on_estimated(r, v, m))
         est.finished.connect(self._on_estimator_finished)
         self.estimator = est
         est.start()
@@ -378,7 +458,9 @@ class QueuePage(QWidget):
             self.estimator = None
         self._kick_estimator()
 
-    def _on_estimated(self, row: int, value) -> None:
+    def _on_estimated(self, row: int, value, model: str | None = None) -> None:
+        if model is not None and model != self.s.model:
+            return                      # computed for a model the user has since left
         self.items[row].estimate = value
         self.cards[row].update_from(self.items[row])
         self._refresh_total()
@@ -394,7 +476,13 @@ class QueuePage(QWidget):
     def start(self) -> None:
         jobs = [(r, it) for r, it in enumerate(self.items)
                 if it.source is not None and not (it.project and it.project.stage == "done")]
-        if not jobs or (self.runner is not None and self.runner.isRunning()):
+        if not jobs or self._closing or (self.runner is not None and self.runner.isRunning()):
+            return
+        if (self.prober and self.prober.isRunning()) or self._probe_queue:
+            self.message.setText("กำลังตรวจแทร็กซับ รอสักครู่…")
+            return
+        if self.estimator is not None and self.estimator.isRunning():
+            self.message.setText("กำลังประมาณราคา รอสักครู่…")
             return
         runner = QueueRunner(jobs, self.s)
         runner.item_progress.connect(self._on_progress)
@@ -448,8 +536,26 @@ class QueuePage(QWidget):
         self.stop_btn.setEnabled(False)
         self.backend_box.setEnabled(True)
         self.model_box.setEnabled(True)
+        if self.prober is not None or self._probe_queue:
+            self.start_btn.setEnabled(False)
+        self._kick_estimator()
         if not self._paused:
             self.message.setText("เสร็จแล้ว — กด ตรวจ/แก้ ที่แต่ละไฟล์")
+
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Stop and join every background thread. True when nothing is left running."""
+        self._closing = True
+        self._probe_queue, self._est_queue = [], []
+        threads = [t for t in (self.runner, self.estimator, self.prober) if t is not None]
+        for t in threads:
+            t.stop()
+        for t in threads:
+            t.wait(timeout_ms)
+        return not any(t.isRunning() for t in threads)
+
+    def reopen(self) -> None:
+        """Allow new work again after a refused close."""
+        self._closing = False
 
     def export_all(self) -> None:
         done = [it for it in self.items if it.project and it.project.stage == "done"]

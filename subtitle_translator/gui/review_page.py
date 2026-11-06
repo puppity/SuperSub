@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QSizeF, Qt, QUrl
+from PySide6.QtCore import QSizeF, Qt, QTimer, QUrl
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPen, QPixmap, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -75,9 +75,17 @@ class VideoPreview(QGraphicsView):
         self.player.errorOccurred.connect(self._on_error)
         self.fallback = False
         self.path: str | None = None
+        self._want: tuple[str, float] | None = None     # latest requested still (path, time)
+        self._grab: CallWorker | None = None
+        self._started: tuple[str, float] | None = None
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(150)
+        self._debounce.timeout.connect(self._start_grab)
 
     def set_source(self, path: str) -> None:
         self.path, self.fallback = path, False
+        self._want = None
         self.still.setPixmap(QPixmap())
         self.player.setSource(QUrl.fromLocalFile(path))
 
@@ -89,15 +97,54 @@ class VideoPreview(QGraphicsView):
         self.text.setText(text)
         self.text.setBrush(QBrush(QColor(color)))
         if self.fallback and self.path:
-            try:
-                png = grab_frame(self.path, (cue.start + cue.end) / 2, cache_dir() / "preview.png")
-                self.still.setPixmap(QPixmap(str(png)).scaled(self.viewport().size(), Qt.KeepAspectRatio))
-            except MediaError:
-                pass
+            self._want = (self.path, (cue.start + cue.end) / 2)
+            self._debounce.start()
         else:
             self.player.pause()
             self.player.setPosition(int(cue.start * 1000))
         self._layout()
+
+    def _start_grab(self) -> None:
+        if self._grab is not None and self._grab.isRunning():
+            return                      # the finish handler re-runs with the latest request
+        if self._want is None:
+            return
+        path, t = self._want
+        self._started = self._want
+        out = cache_dir() / "preview.png"
+        worker = CallWorker(lambda: grab_frame(path, t, out))
+        worker.done.connect(lambda png, k=(path, t): self._on_frame(k, png))
+        worker.failed.connect(lambda exc, k=(path, t): self._on_frame(k, None))
+        worker.finished.connect(self._on_grab_finished)
+        self._grab = worker
+        worker.start()
+
+    def _on_frame(self, key: tuple[str, float], png) -> None:
+        if self._want is not None and self._want != key:
+            return                      # a newer cue was requested; its own result will follow
+        if self.path != key[0]:
+            return
+        if png is None:
+            self.still.setPixmap(QPixmap())
+            return
+        pix = QPixmap(str(png))
+        self.still.setPixmap(pix.scaled(self.viewport().size(), Qt.KeepAspectRatio) if not pix.isNull() else pix)
+
+    def _on_grab_finished(self) -> None:
+        if self._grab is not None:
+            self._grab.wait()
+            self._grab = None
+        if self._want is not None and self._want != self._started and not self._debounce.isActive():
+            self._start_grab()
+
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        self._debounce.stop()
+        self._want = None
+        if self._grab is not None:
+            self._grab.wait(timeout_ms)
+            if self._grab.isRunning():
+                return False
+        return True
 
     def toggle(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -237,6 +284,11 @@ class ReviewPage(QWidget):
         return names
 
     def load(self, project: Project) -> None:
+        self.current = None
+        self.editor.clear()
+        self.cps_label.setText("")
+        self.edit_label.setText("แก้บรรทัด")
+        self.timeline.set_selected(None)
         self.project = project
         ep = project.episode
         self.title.setText(Path(ep.video_path).name)
@@ -343,6 +395,14 @@ class ReviewPage(QWidget):
         current = self.current
         self._fill_table()
         self.select(current)
+
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Join background threads. True when nothing is left running."""
+        ok = self.preview.shutdown(timeout_ms)
+        if self._worker is not None:
+            self._worker.wait(timeout_ms)
+            ok = ok and not self._worker.isRunning()
+        return ok
 
     def retranslate(self) -> None:
         if self.current is None or not self.project:

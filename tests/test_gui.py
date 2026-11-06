@@ -29,6 +29,7 @@ def test_call_worker_reports_result_and_error(qtbot):
 import json
 
 import pytest
+from PySide6.QtCore import QThread
 
 from subtitle_translator.core.settings import save_settings
 from subtitle_translator.gui import settings_page as sp
@@ -149,9 +150,11 @@ def test_queue_page_adds_sidecar_file_without_ffmpeg(qtbot, tmp_path, monkeypatc
     page = QueuePage(Settings(backend="claude_code"), lambda: None)   # no API estimate thread in tests
     qtbot.addWidget(page)
     page.add_paths([tmp_path])
+    qtbot.waitUntil(lambda: not page._busy(), timeout=5000)
     assert len(page.items) == 1
     assert page.items[0].source == tmp_path / "EP01.srt"
     page.add_paths([v])
+    qtbot.waitUntil(lambda: not page._busy(), timeout=5000)
     assert len(page.items) == 1
 
 
@@ -175,6 +178,7 @@ def _page_with_item(qtbot, tmp_path, monkeypatch):
     page = QueuePage(Settings(backend="claude_code"), lambda: None)
     qtbot.addWidget(page)
     page.add_paths([v])
+    qtbot.waitUntil(lambda: not page._busy(), timeout=5000)
     return page
 
 
@@ -277,3 +281,135 @@ def test_review_retranslate_guard_and_failure(qtbot, tmp_path, monkeypatch, no_r
     qtbot.waitUntil(lambda: page.retranslate_btn.isEnabled(), timeout=5000)
     first.wait()
     assert p.episode.cue(2).thai == "ไทย 2"
+
+
+def test_review_load_resets_selection_so_edit_cannot_leak(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    a = review_project(tmp_path)
+    b = review_project(tmp_path / "other")
+    (tmp_path / "other").mkdir()
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(a)
+    page.select(2)
+    page.editor.setPlainText("พิมพ์ค้างไว้")
+    page.load(b)
+    assert page.current is None and page.editor.toPlainText() == ""
+    assert page.timeline.selected is None
+    page.save_edit()
+    assert b.episode.cue(2).thai == "ไทย 2" and b.episode.cue(2).status == "translated"
+    assert not (tmp_path / "other" / "EP01.stproj.json").exists()
+
+
+def test_add_paths_probes_off_gui_thread_and_queues(qtbot, tmp_path, monkeypatch, no_real_ai):
+    import threading
+    from subtitle_translator.gui import queue_page as qp
+    for n in ("EP01", "EP02"):
+        (tmp_path / f"{n}.mkv").write_bytes(b"")
+        (tmp_path / f"{n}.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+    gate = threading.Event()
+    seen = []
+
+    def probe(p):
+        seen.append(threading.current_thread() is threading.main_thread())
+        gate.wait(5)
+        if p.name == "EP02.mkv":
+            raise RuntimeError("probe boom")
+        return []
+    monkeypatch.setattr(qp, "list_sub_tracks", probe)
+    page = QueuePage(Settings(backend="claude_code"), lambda: None)
+    qtbot.addWidget(page)
+    page.add_paths([tmp_path / "EP01.mkv"])
+    first = page.prober
+    assert first is not None and page._busy()
+    page.add_paths([tmp_path / "EP02.mkv"])          # queued, running thread untouched
+    assert page.prober is first
+    page.start()                                     # blocked while probing
+    assert page.runner is None
+    gate.set()
+    qtbot.waitUntil(lambda: not page._busy(), timeout=5000)
+    first.wait()
+    assert seen and not any(seen)
+    assert [i.video.name for i in page.items] == ["EP01.mkv", "EP02.mkv"]
+    assert page.items[0].source is not None
+    assert page.items[1].error and "probe boom" in page.items[1].error
+
+
+def test_queue_shutdown_stops_runner(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import queue_page as qp
+    page = _page_with_item(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(qp, "make_backend", lambda s: object())
+    monkeypatch.setattr(qp, "prepare_project", lambda *a, **k: object())
+
+    def spin(project, backend, settings, progress, should_stop):
+        while not should_stop():
+            QThread.msleep(10)
+        raise qp.Stopped()
+    monkeypatch.setattr(qp, "run_project", spin)
+    page.start()
+    runner = page.runner
+    assert runner.isRunning()
+    assert page.shutdown(5000) is True
+    assert not runner.isRunning()
+    runner.wait()
+
+
+def test_estimate_deferred_while_run_active_and_stale_model_ignored(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import queue_page as qp
+    page = _page_with_item(qtbot, tmp_path, monkeypatch)
+    page.s.backend = "api"
+    started = []
+    monkeypatch.setattr(qp.EstimateRunner, "start", lambda self: started.append(self))
+    page.runner = type("R", (), {"isRunning": lambda self: True})()
+    page._estimate_rows([0])
+    assert started == [] and page._est_queue == [0]
+    page.runner = None
+    page._kick_estimator()
+    assert len(started) == 1
+    page.estimator = None
+    page._on_estimated(0, 1.5, "some-other-model")
+    assert page.items[0].estimate is None
+    page._on_estimated(0, 1.5, page.s.model)
+    assert page.items[0].estimate == 1.5
+
+
+def test_preview_frame_grab_is_async_and_latest_wins(qtbot, tmp_path, monkeypatch, no_real_ai):
+    import threading
+    from subtitle_translator.gui import review_page as rp
+    gate = threading.Event()
+    calls = []
+
+    def grab(video, t, out, width=640):
+        calls.append((threading.current_thread() is threading.main_thread(), t))
+        gate.wait(5)
+        if t > 100:
+            raise rp.MediaError("bad")
+        return tmp_path / "x.png"
+    monkeypatch.setattr(rp, "grab_frame", grab)
+    ep = review_project(tmp_path).episode
+    pv = rp.VideoPreview()
+    qtbot.addWidget(pv)
+    pv.path, pv.fallback = str(tmp_path / "EP01.mkv"), True
+    pv.show_cue(ep.cues[0], "a", "#fff")
+    qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)
+    pv.show_cue(ep.cues[1], "b", "#fff")             # arrives while one is running
+    pv.show_cue(ep.cues[2], "c", "#fff")             # replaces the pending one
+    gate.set()
+    qtbot.waitUntil(lambda: len(calls) == 2 and pv._grab is None, timeout=5000)
+    assert not any(c[0] for c in calls)
+    assert calls[1][1] == (ep.cues[2].start + ep.cues[2].end) / 2
+    pv.shutdown(3000)
+
+
+def test_main_window_close_waits_for_threads(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from PySide6.QtGui import QCloseEvent
+    w = MainWindow(Settings(backend="claude_code"), settings_path=tmp_path / "s.json")
+    qtbot.addWidget(w)
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    assert ev.isAccepted()
+    w.queue_page.shutdown = lambda timeout_ms=5000: False
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    assert not ev.isAccepted()

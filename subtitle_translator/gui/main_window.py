@@ -68,5 +68,17 @@ class MainWindow(QMainWindow):
         self.review_page.load(project)
         self.go(1)
 
+    def closeEvent(self, event) -> None:
+        pages = (self.queue_page, self.review_page)
+        results = [page.shutdown() for page in pages]     # stop every page, not just the first
+        if all(results):
+            event.accept()
+            return
+        for page in pages:
+            if hasattr(page, "reopen"):
+                page.reopen()
+        self.statusBar().showMessage("กำลังหยุดงาน… กรุณารอสักครู่", 8000)
+        event.ignore()
+
     def persist(self) -> None:
         save_settings(self.settings, self.settings_path)
