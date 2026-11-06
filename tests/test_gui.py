@@ -115,3 +115,96 @@ def test_check_ignored_while_running(qtbot, fakes):
     qtbot.waitUntil(lambda: page.status_label.text() == "done", timeout=5000)
     first.wait()
     assert page.save_test_btn.isEnabled() and page.cc_check_btn.isEnabled()
+
+
+from pathlib import Path
+
+from subtitle_translator.core.media import SubTrack
+from subtitle_translator.gui.queue_page import QueuePage, describe_source
+
+
+def T(i, codec, lang):
+    return SubTrack(sub_index=i, codec=codec, language=lang, title="")
+
+
+def test_describe_source_rules(tmp_path):
+    v = tmp_path / "EP01.mkv"
+    side = tmp_path / "EP01.srt"
+    assert describe_source(v, [T(0, "ass", "jpn")], [], ["ja", "en"])[0].sub_index == 0
+    src, cands, meta = describe_source(v, [T(0, "hdmv_pgs_subtitle", "jpn")], [side], ["ja", "en"])
+    assert src == side and "ไฟล์ซับข้างวิดีโอ" in meta
+    src, cands, meta = describe_source(v, [], [], ["ja", "en"])
+    assert src is None and "ต้องถอดเสียง" in meta
+    src, cands, meta = describe_source(v, [T(0, "hdmv_pgs_subtitle", "jpn")], [], ["ja", "en"])
+    assert src is None and "ซับภาพ" in meta
+    src, cands, meta = describe_source(v, [T(0, "ass", "jpn"), T(1, "subrip", "jpn")], [], ["ja", "en"])
+    assert src is None and len(cands) == 2
+
+
+def test_queue_page_adds_sidecar_file_without_ffmpeg(qtbot, tmp_path, monkeypatch):
+    v = tmp_path / "EP01.mkv"
+    v.write_bytes(b"")
+    (tmp_path / "EP01.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+    monkeypatch.setattr("subtitle_translator.gui.queue_page.list_sub_tracks", lambda p: [])
+    page = QueuePage(Settings(backend="claude_code"), lambda: None)   # no API estimate thread in tests
+    qtbot.addWidget(page)
+    page.add_paths([tmp_path])
+    assert len(page.items) == 1
+    assert page.items[0].source == tmp_path / "EP01.srt"
+    page.add_paths([v])
+    assert len(page.items) == 1
+
+
+@pytest.fixture
+def no_real_ai(monkeypatch):
+    """Nothing in these tests may reach the real API, CLI or keyring."""
+    monkeypatch.setattr("subtitle_translator.ai.factory.get_api_key", lambda: None)
+    monkeypatch.setattr("subtitle_translator.ai.claude_code_backend.find_claude", lambda: None)
+
+    def refuse(settings):
+        raise AssertionError("real backend requested")
+    monkeypatch.setattr("subtitle_translator.gui.queue_page.make_backend", refuse)
+    monkeypatch.setattr("subtitle_translator.gui.review_page.make_backend", refuse, raising=False)
+
+
+def _page_with_item(qtbot, tmp_path, monkeypatch):
+    v = tmp_path / "EP01.mkv"
+    v.write_bytes(b"")
+    (tmp_path / "EP01.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+    monkeypatch.setattr("subtitle_translator.gui.queue_page.list_sub_tracks", lambda p: [])
+    page = QueuePage(Settings(backend="claude_code"), lambda: None)
+    qtbot.addWidget(page)
+    page.add_paths([v])
+    return page
+
+
+def test_queue_runner_failure_and_double_start_guard(qtbot, tmp_path, monkeypatch, no_real_ai):
+    import threading
+    from subtitle_translator.gui import queue_page as qp
+    page = _page_with_item(qtbot, tmp_path, monkeypatch)
+    gate = threading.Event()
+
+    def slow_backend(settings):
+        gate.wait(5)
+        raise RuntimeError("boom")
+    monkeypatch.setattr(qp, "make_backend", slow_backend)
+    page.start()
+    first = page.runner
+    assert first is not None and not page.start_btn.isEnabled()
+    page.start()                       # ignored while running
+    assert page.runner is first
+    gate.set()
+    qtbot.waitUntil(lambda: page.runner is None, timeout=5000)
+    first.wait()
+    assert page.items[0].error and "boom" in page.items[0].error
+    assert page.start_btn.isEnabled() and not page.stop_btn.isEnabled()
+
+
+def test_estimate_runner_reports_none_when_backend_unavailable(qtbot, tmp_path, no_real_ai):
+    from subtitle_translator.gui.queue_page import EstimateRunner, QueueItem
+    item = QueueItem(video=tmp_path / "a.mkv", source=tmp_path / "a.srt")
+    runner = EstimateRunner([(0, item)], Settings(backend="api"))
+    with qtbot.waitSignal(runner.estimated, timeout=3000) as blocker:
+        runner.start()
+    runner.wait()
+    assert blocker.args == [0, None]
