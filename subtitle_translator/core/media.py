@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -93,7 +94,9 @@ def pick_track(tracks: list[SubTrack], prefer: tuple[str, ...] = ("ja", "en")
 
 
 def extract_sub(video: str | Path, track: SubTrack, out_dir: str | Path) -> Path:
-    out_dir = Path(out_dir)
+    # Keyed by the resolved full path so two videos sharing a stem never collide.
+    key = hashlib.sha1(str(Path(video).resolve()).encode("utf-8")).hexdigest()[:12]
+    out_dir = Path(out_dir) / key
     out_dir.mkdir(parents=True, exist_ok=True)
     keep_ass = track.codec in ("ass", "ssa")
     ext = "ass" if keep_ass else "srt"

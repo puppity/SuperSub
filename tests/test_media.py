@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -91,3 +92,21 @@ def test_list_and_extract_real_mkv(tmp_path):
     assert load_cues(out)[0][0].src == "お姉ちゃん"
     png = grab_frame(mkv, 1.0, tmp_path / "f.png", width=160)
     assert png.exists() and png.stat().st_size > 0
+
+
+def test_extract_cache_path_differs_for_same_stem(tmp_path, monkeypatch):
+    from subtitle_translator.core import media
+
+    def fake_run(cmd, timeout=None):
+        Path(cmd[-1]).write_text("x")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(media, "_run", fake_run)
+    monkeypatch.setattr(media, "tool_path", lambda name: name)
+    a = tmp_path / "a" / "EP01.mkv"
+    b = tmp_path / "b" / "EP01.mkv"
+    t = SubTrack(sub_index=0, codec="subrip", language="jpn", title="")
+    pa = extract_sub(a, t, tmp_path / "cache")
+    pb = extract_sub(b, t, tmp_path / "cache")
+    assert pa != pb and pa.name == pb.name == "EP01.s0.srt"
+    assert pa.parent.parent == pb.parent.parent == tmp_path / "cache"
