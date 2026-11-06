@@ -90,6 +90,9 @@ class VideoPreview(QGraphicsView):
         self.path, self.fallback = path, False
         self._want = None
         self.still.setPixmap(QPixmap())
+        self._load_media(path)
+
+    def _load_media(self, path: str) -> None:
         self.player.setSource(QUrl.fromLocalFile(path))
 
     def _on_error(self, *_):
@@ -143,6 +146,10 @@ class VideoPreview(QGraphicsView):
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         self._debounce.stop()
         self._want = None
+        # Release the media before the widget dies: the FFmpeg backend's native
+        # threads can otherwise outlive the player and crash on teardown.
+        self.player.stop()
+        self.player.setSource(QUrl())
         if self._grab is not None:
             self._grab.wait(timeout_ms)
             if self._grab.isRunning():

@@ -48,6 +48,9 @@ def join_gui_threads(qtbot, monkeypatch):
             _orig(self, *a, **k)
             made.append(self)
         monkeypatch.setattr(cls, "__init__", init)
+    # Never hand a real file to QtMultimedia in tests: its native FFmpeg threads
+    # race widget teardown and crash the test process intermittently.
+    monkeypatch.setattr(rp.VideoPreview, "_load_media", lambda self, path: None)
     yield
     assert all([p.shutdown(5000) for p in made]), "a GUI thread was still running at teardown"
 
