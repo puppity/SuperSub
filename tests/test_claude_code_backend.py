@@ -36,13 +36,14 @@ def test_success_with_code_fence_and_prompt_shape():
     assert res.data == {"ok": True} and res.cost_usd is None
     args, kw = runner.calls[0]
     assert args[:6] == ["claude", "-p", "--output-format", "json", "--model", "opus"]
-    assert args[6:] == ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+    assert args[6:8] == ["--effort", REQ.effort]
+    assert args[8:] == ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
                         "--no-session-persistence", "--permission-prompts", "none"]
     assert "--bare" not in args
     prompt = kw["input"].decode("utf-8")
     assert prompt.index("SYS") < prompt.index("CTX") < prompt.index("TASK")
     assert '"required": ["ok"]' in prompt
-    assert kw["timeout"] == 600
+    assert kw["timeout"] == 1800
 
 
 def test_invalid_json_is_retried_once():

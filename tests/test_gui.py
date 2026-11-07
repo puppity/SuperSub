@@ -658,3 +658,22 @@ def test_api_backend_auth_pause_does_not_offer_claude_login(qtbot):
     page._on_paused("API key ไม่ถูกต้อง", "auth")
     assert page.login_btn.isHidden()
     assert getattr(page, "_login_box", None) is None
+
+
+def test_progress_status_shows_elapsed_time_for_long_steps(qtbot, monkeypatch):
+    from pathlib import Path
+    from subtitle_translator.gui import queue_page as qp
+    page = qp.QueuePage(Settings(backend="claude_code"), lambda: None)
+    qtbot.addWidget(page)
+    page._append(qp.QueueItem(video=Path("a.mkv"), source=Path("a.ass")))
+    now = [1000.0]
+    monkeypatch.setattr(qp.time, "monotonic", lambda: now[0])
+    page._on_progress(0, "วิเคราะห์ตัวละคร", 0.0)
+    assert page.items[0].status == "วิเคราะห์ตัวละคร 0%"
+    assert page._tick.isActive()
+    now[0] += 192
+    page._refresh_elapsed()
+    assert page.items[0].status == "วิเคราะห์ตัวละคร 0% · 3:12"
+    assert page.cards[0].status.property("tone") == "busy"
+    page._on_failed(0, "x")
+    assert not page._tick.isActive()

@@ -7,7 +7,9 @@ import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QThread, Qt, Signal
+import time
+
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QProgressBar,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -167,7 +169,7 @@ def status_tone(item: QueueItem) -> str | None:
         return "bad"
     if item.project is not None and item.project.stage == "done":
         return "warn" if "ต้องแปลเอง" in item.status else "good"
-    if item.status.endswith("%"):
+    if "%" in item.status:
         return "busy"
     return None
 
@@ -270,6 +272,12 @@ class QueuePage(QWidget):
         self._new_rows: list[int] = []
         self._closing = False
         self._paused = False
+        # One AI call (e.g. whole-episode analysis) can run for minutes with no progress
+        # event; a ticking elapsed time shows the run is alive, not frozen.
+        self._stage: dict[int, tuple[str, float, float]] = {}    # row -> (stage, frac, started)
+        self._tick = QTimer(self)
+        self._tick.setInterval(1000)
+        self._tick.timeout.connect(self._refresh_elapsed)
         self.setAcceptDrops(True)
 
         outer = QHBoxLayout(self)
@@ -602,11 +610,33 @@ class QueuePage(QWidget):
 
     def _on_progress(self, row: int, stage: str, frac: float) -> None:
         item = self.items[row]
-        item.status, item.error = f"{stage} {int(frac * 100)}%", None
+        prev = self._stage.get(row)
+        started = prev[2] if prev and prev[0] == stage else time.monotonic()
+        self._stage = {row: (stage, frac, started)}
+        if not self._tick.isActive():
+            self._tick.start()
+        item.status, item.error = self._status_text(stage, frac, started), None
         self.cards[row].set_progress(int(frac * 1000))
         self.cards[row].update_from(item)
 
+    @staticmethod
+    def _status_text(stage: str, frac: float, started: float) -> str:
+        secs = int(time.monotonic() - started)
+        text = f"{stage} {int(frac * 100)}%"
+        return text + (f" · {secs // 60}:{secs % 60:02d}" if secs >= 5 else "")
+
+    def _refresh_elapsed(self) -> None:
+        for row, (stage, frac, started) in self._stage.items():
+            if row < len(self.items):
+                self.items[row].status = self._status_text(stage, frac, started)
+                self.cards[row].update_from(self.items[row])
+
+    def _stop_elapsed(self) -> None:
+        self._tick.stop()
+        self._stage = {}
+
     def _on_done(self, row: int, project) -> None:
+        self._stop_elapsed()
         item = self.items[row]
         item.project, item.status = project, "พร้อมตรวจ"
         failed = sum(1 for c in project.episode.cues if c.status == "failed")
@@ -616,6 +646,7 @@ class QueuePage(QWidget):
         self.cards[row].update_from(item)
 
     def _on_failed(self, row: int, msg: str) -> None:
+        self._stop_elapsed()
         item = self.items[row]
         item.status, item.error = "ผิดพลาด", msg
         self.cards[row].update_from(item)
@@ -652,6 +683,7 @@ class QueuePage(QWidget):
         box.open()
 
     def _on_finished(self) -> None:
+        self._stop_elapsed()
         if self.runner is not None:
             self.runner.wait()          # never drop a thread that is still winding down
             self.runner = None

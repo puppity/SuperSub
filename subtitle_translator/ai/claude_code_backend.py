@@ -34,6 +34,8 @@ def _shared_workdir() -> str:
 
 # The CLI reads untrusted subtitle text, so run it with no tools, no MCP servers, no skills and
 # no transcript on disk. (--bare is NOT used: it disables the Max OAuth login.)
+# A whole-episode analysis is one long call; 10 minutes was too tight for long episodes.
+CALL_TIMEOUT_S = 1800
 SAFETY_FLAGS = ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
                 "--no-session-persistence", "--permission-prompts", "none"]
 
@@ -69,19 +71,23 @@ class ClaudeCodeBackend:
             parts.append(error_note)
         return "\n\n".join(parts)
 
-    def _call(self, prompt: str) -> str:
+    def _call(self, prompt: str, effort: str | None = None) -> str:
         exe = self.exe or find_claude()
         if not exe:
             raise AIError(AIErrorKind.NOT_INSTALLED, "ไม่พบ Claude Code — ติดตั้งแล้วล็อกอินด้วยบัญชี Max ก่อน")
-        args = [exe, "-p", "--output-format", "json", "--model", MODEL_ALIAS.get(self.model, "opus"),
-                *SAFETY_FLAGS]
+        args = [exe, "-p", "--output-format", "json", "--model", MODEL_ALIAS.get(self.model, "opus")]
+        if effort:
+            # Without this the CLI uses the user's own default (often xhigh), which made
+            # whole-episode analysis take many minutes.
+            args += ["--effort", effort]
+        args += SAFETY_FLAGS
         try:
             r = self.runner(args, input=prompt.encode("utf-8"), capture_output=True,
-                            timeout=600, cwd=self.workdir, **no_window())
+                            timeout=CALL_TIMEOUT_S, cwd=self.workdir, **no_window())
         except FileNotFoundError as exc:
             raise AIError(AIErrorKind.NOT_INSTALLED, "ไม่พบ Claude Code — ติดตั้งแล้วล็อกอินด้วยบัญชี Max ก่อน") from exc
         except subprocess.TimeoutExpired as exc:
-            raise AIError(AIErrorKind.NETWORK, "Claude Code ตอบช้าเกิน 10 นาที") from exc
+            raise AIError(AIErrorKind.NETWORK, f"Claude Code ตอบช้าเกิน {CALL_TIMEOUT_S // 60} นาที") from exc
         out = r.stdout.decode("utf-8", "replace")
         err = r.stderr.decode("utf-8", "replace")
         try:
@@ -110,12 +116,12 @@ class ClaudeCodeBackend:
         return data
 
     def run_json(self, req: AIRequest) -> AIResult:
-        text = self._call(self._prompt(req))
+        text = self._call(self._prompt(req), req.effort)
         try:
             data = self._parse(text, req.schema)
         except (ValueError, AIError) as first:
             note = f"Your previous reply was invalid ({first}). Return only valid JSON for the schema."
-            text = self._call(self._prompt(req, note))
+            text = self._call(self._prompt(req, note), req.effort)
             try:
                 data = self._parse(text, req.schema)
             except ValueError as exc:
@@ -126,5 +132,5 @@ class ClaudeCodeBackend:
         return None
 
     def check(self) -> str:
-        self._call("Reply with exactly: OK")
+        self._call("Reply with exactly: OK", "low")
         return "เชื่อมต่อ Claude Code ได้"
