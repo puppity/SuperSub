@@ -19,6 +19,9 @@ from ..ai.backend import AIError, AIErrorKind
 from ..ai.factory import make_backend
 from ..core.media import MediaError, SubTrack, lang_of, list_sub_tracks, pick_track, sidecar_subs
 from ..core.proxy import ensure_proxy, needs_proxy
+from .icons import set_icon
+from .motion import animate_progress
+from .mpv_preview import mpv_available
 from ..core.transcribe import TRANSCRIBE, Transcribe, TranscribeError
 from ..core.models import Project, untranslated_ids
 from ..core.pricing import MODELS
@@ -27,7 +30,7 @@ from ..core.settings import Settings, cache_dir
 from ..core.subio import SubtitleReadError
 from ..export import export_project
 from ..translate.pipeline import Stopped, estimate_project_cost, prepare_project, run_project
-from .theme import set_tone
+from .theme import COLORS, set_tone
 
 log = logging.getLogger(__name__)
 VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".webm", ".avi"}
@@ -93,7 +96,8 @@ class QueueRunner(QThread):
                 return
             try:
                 backend = make_backend(self.settings)
-                if needs_proxy(item.video):        # build the playable preview while the AI works
+                # Without mpv, build a playable preview copy while the AI works.
+                if not mpv_available() and needs_proxy(item.video):
                     ensure_proxy(item.video)
                 report = lambda stage, f, r=row: self.item_progress.emit(r, stage, f)
                 project = prepare_project(item.video, item.source, self.settings, cache_dir(),
@@ -230,7 +234,7 @@ class FileCard(QFrame):
         self.bar.setVisible(True)
         self._anim.stop()
         if value <= self.bar.value():
-            self.bar.setValue(value)
+            animate_progress(self.bar, value)
             return
         self._anim.setStartValue(self.bar.value())
         self._anim.setEndValue(value)
@@ -302,9 +306,11 @@ class QueuePage(QWidget):
         title = QLabel("คิวงาน")
         title.setProperty("role", "h1")
         head.addWidget(title, 1)
-        add_files = QPushButton("+ เพิ่มไฟล์")
+        add_files = QPushButton("เพิ่มไฟล์")
+        set_icon(add_files, "plus")
         add_files.clicked.connect(self._pick_files)
-        add_dir = QPushButton("+ เพิ่มโฟลเดอร์")
+        add_dir = QPushButton("เพิ่มโฟลเดอร์")
+        set_icon(add_dir, "folder")
         add_dir.clicked.connect(self._pick_dir)
         head.addWidget(add_files)
         head.addWidget(add_dir)
@@ -315,7 +321,7 @@ class QueuePage(QWidget):
         left.addWidget(drop)
         self.list_box = QVBoxLayout()
         self.list_box.setSpacing(10)
-        self.empty = QLabel("ยังไม่มีไฟล์ในคิว\nเริ่มจากกด “+ เพิ่มไฟล์” หรือลากวิดีโอมาวาง")
+        self.empty = QLabel("ยังไม่มีไฟล์ในคิว\nเริ่มจากกด “เพิ่มไฟล์” หรือลากวิดีโอมาวาง")
         self.empty.setProperty("role", "empty")
         self.empty.setAlignment(Qt.AlignCenter)
         self.list_box.addWidget(self.empty)
@@ -366,15 +372,19 @@ class QueuePage(QWidget):
         self.total.setWordWrap(True)
         sl.addWidget(self.total)
         self.est_btn = QPushButton("ประมาณราคา")
+        set_icon(self.est_btn, "coins")
         self.est_btn.clicked.connect(self.estimate)
         sl.addWidget(self.est_btn)
         sl.addSpacing(6)
         self.start_btn = QPushButton("เริ่มแปลทั้งคิว")
         self.start_btn.setProperty("accent", True)
+        set_icon(self.start_btn, "play", COLORS["on_accent"])
         self.start_btn.clicked.connect(self.start)
         self.stop_btn = QPushButton("หยุด", enabled=False)
+        set_icon(self.stop_btn, "stop")
         self.stop_btn.clicked.connect(self.stop)
         export_all = QPushButton("ส่งออกไฟล์ที่เสร็จทั้งหมด")
+        set_icon(export_all, "export")
         export_all.clicked.connect(self.export_all)
         for b in (self.start_btn, self.stop_btn, export_all):
             b.setCursor(Qt.PointingHandCursor)
@@ -386,6 +396,7 @@ class QueuePage(QWidget):
         self.message.setProperty("role", "hint")
         sl.addWidget(self.message)
         self.login_btn = QPushButton("เปิด Terminal เพื่อล็อกอิน Claude")
+        set_icon(self.login_btn, "terminal")
         self.login_btn.setCursor(Qt.PointingHandCursor)
         self.login_btn.clicked.connect(self.open_login)
         self.login_btn.setVisible(False)

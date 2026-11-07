@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from ..core.models import Project
-from ..core.series import series_dir
+from ..core.series import output_stem, series_dir
 from ..core.settings import Settings
 from .ass_writer import write_ass
 from .srt_writer import write_srt
@@ -12,8 +12,8 @@ from .srt_writer import write_srt
 
 def output_paths(video: str | Path, out_dir: str | None) -> tuple[Path, Path]:
     v = Path(video)
-    folder = series_dir(v, out_dir)
-    return folder / f"{v.stem}.th.srt", folder / f"{v.stem}.th.ass"
+    folder, stem = series_dir(v, out_dir), output_stem(v)
+    return folder / f"{stem}.th.srt", folder / f"{stem}.th.ass"
 
 
 def _same_file(a: str | Path, b: str | Path) -> bool:
@@ -39,7 +39,7 @@ def export_project(project: Project, settings: Settings, overwrite: bool = False
 
 def mux_path(video: str | Path, out_dir: str | None) -> Path:
     v = Path(video)
-    return series_dir(v, out_dir) / f"{v.stem}.th.mkv"
+    return series_dir(v, out_dir) / f"{output_stem(v)}.th.mkv"
 
 
 def mux_mkv(video: str | Path, ass: str | Path, out: str | Path) -> Path:

@@ -2,7 +2,7 @@
 a = Analysis(
     ["subtitle_translator/__main__.py"],
     pathex=["."],
-    binaries=[("bin/ffmpeg.exe", "bin"), ("bin/ffprobe.exe", "bin")],
+    binaries=[("bin/ffmpeg.exe", "bin"), ("bin/ffprobe.exe", "bin"), ("bin/libmpv-2.dll", "bin")],
     datas=[],
     hiddenimports=["keyring.backends.Windows"],
     excludes=["tkinter"],

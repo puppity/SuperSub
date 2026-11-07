@@ -7,3 +7,4 @@ bin/*.exe
 *.stproj.json
 *.egg-info/
 dist_new/
+bin/*.dll

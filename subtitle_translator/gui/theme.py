@@ -23,6 +23,7 @@ QFrame#rail { background: %(rail)s; border-right: 1px solid #2A2A2A; }
 QToolButton[nav="true"] { background: transparent; color: %(text3)s; border: 0; border-radius: 10px; padding: 6px 2px; font-size: 10pt; }
 QToolButton[nav="true"]:checked { background: #2D2D2D; color: %(text)s; }
 QToolButton[nav="true"]:hover:!checked { background: #242424; color: %(text2)s; }
+QToolButton[nav="true"]:pressed { background: #202020; padding-top: 8px; padding-bottom: 0; }
 QFrame[card="true"] { background: %(card)s; border: 1px solid %(stroke)s; border-radius: 12px; }
 QFrame[card="true"] QLabel, QFrame[card="true"] QCheckBox, QFrame[card="true"] QRadioButton { background: transparent; }
 QLabel[role="h1"] { font-size: 22pt; font-weight: 600; }
@@ -40,21 +41,31 @@ QLabel[role="pill"][tone="busy"] { background: %(selected)s; color: %(accent)s; 
 QLabel[role="pill"][tone="warn"] { background: #3A3020; color: %(warn)s; }
 QPushButton { background: #303030; border: 1px solid %(stroke2)s; border-radius: 8px; padding: 8px 16px; min-height: 24px; }
 QPushButton:hover { background: #3A3A3A; border-color: #4A4A4A; }
-QPushButton:pressed { background: #2A2A2A; }
+QPushButton:pressed { background: #2A2A2A; padding-top: 9px; padding-bottom: 7px; }
+QPushButton:focus { border: 1px solid %(accent)s; }
 QPushButton:disabled { color: #6A6A6A; background: #262626; border-color: #2E2E2E; }
 QPushButton:checked { background: %(selected)s; color: %(accent)s; border-color: #2F5266; }
 QPushButton[accent="true"] { background: %(accent)s; color: %(on_accent)s; border: 0; font-weight: 600; }
 QPushButton[accent="true"]:hover { background: #7AD6FF; }
-QPushButton[accent="true"]:pressed { background: #4FB8E8; }
+QPushButton[accent="true"]:pressed { background: #4FB8E8; padding-top: 9px; padding-bottom: 7px; }
+QPushButton[accent="true"]:focus { border: 2px solid %(text)s; }
 QPushButton[accent="true"]:disabled { background: #2C4350; color: #7F98A6; }
 QPushButton[flat="true"] { background: transparent; border: 0; color: %(text3)s; padding: 6px 10px; }
 QPushButton[flat="true"]:hover { background: #333333; color: %(text)s; }
+QPushButton[icon="true"] { padding: 8px 10px; }
+QSlider::groove:horizontal { height: 4px; background: #3A3A3A; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: %(accent)s; border-radius: 2px; }
+QSlider::handle:horizontal { background: %(text)s; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }
+QSlider::handle:horizontal:hover { background: #FFFFFF; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
+QSlider::sub-page:horizontal:disabled { background: #3A3A3A; }
+QSlider::handle:horizontal:disabled { background: #555555; }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox { background: %(field)s; border: 1px solid %(stroke2)s; border-bottom: 2px solid #4A4A4A; border-radius: 8px; padding: 7px 10px; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus { border-bottom: 2px solid %(accent)s; }
 QComboBox::drop-down { border: 0; width: 26px; }
 QComboBox QAbstractItemView { background: %(card2)s; border: 1px solid %(stroke2)s; selection-background-color: %(selected)s; padding: 4px; outline: 0; }
 QTableWidget { background: %(card)s; border: 1px solid %(stroke)s; border-radius: 12px; gridline-color: transparent; selection-background-color: %(selected)s; selection-color: %(text)s; alternate-background-color: #292929; }
 QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid #2E2E2E; }
+QTableWidget::item:hover:!selected { background: #2E2E2E; }
 QHeaderView::section { background: %(card)s; color: %(text3)s; border: 0; border-bottom: 1px solid %(stroke)s; padding: 8px; font-size: 10.5pt; }
 QRadioButton, QCheckBox { spacing: 10px; padding: 4px 0; }
 QRadioButton::indicator, QCheckBox::indicator { width: 18px; height: 18px; border: 2px solid #6A6A6A; background: %(field)s; }
@@ -99,3 +110,7 @@ def apply_theme(app: QApplication) -> None:
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
     app.setStyleSheet(QSS)
+    from .motion import InteractionPolish  # noqa: PLC0415
+    if not hasattr(app, "_polish"):
+        app._polish = InteractionPolish(app)
+        app.installEventFilter(app._polish)

@@ -5,6 +5,7 @@ from subtitle_translator.translate.analyze import PALETTE, analyze, build_analyz
 from subtitle_translator.translate.prompts import ANALYZE_SCHEMA, format_cues
 
 ANALYSIS = {
+    "series_title": "Sample Show", "episode_number": 1,
     "summary": "พี่น้องสาวตื่นสายไปโรงเรียน",
     "glossary": [{"source": "Cyclone Magnum", "thai": "ไซโคลนแม็กนั่ม"}],
     "characters": [

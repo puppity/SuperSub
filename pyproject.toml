@@ -8,6 +8,7 @@ dependencies = [
   "pysubs2>=1.7",
   "jsonschema>=4.22",
   "keyring>=25",
+  "mpv>=1.0",
   "platformdirs>=4.2",
   "faster-whisper>=1.2",
   "numpy>=1.26",

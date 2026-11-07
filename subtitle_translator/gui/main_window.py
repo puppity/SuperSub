@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QMainWindow, QStackedWidget, QToolButton,
+    QButtonGroup, QFrame, QHBoxLayout, QMainWindow, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -13,6 +13,7 @@ from ..core.proxy import stop_all as stop_proxies
 from ..core.settings import Settings, save_settings
 from .queue_page import QueuePage
 from .review_page import ReviewPage
+from .motion import slide_in
 from .settings_page import SettingsPage
 from .theme import COLORS
 
@@ -92,20 +93,7 @@ class MainWindow(QMainWindow):
         if self.stack.currentIndex() == index:
             return
         self.stack.setCurrentIndex(index)
-        self._fade_in(self.stack.currentWidget())
-
-    def _fade_in(self, page: QWidget) -> None:
-        """Short fade on page switch. The effect is removed afterwards: a live opacity
-        effect forces offscreen rendering of the whole page (and its video view)."""
-        effect = QGraphicsOpacityEffect(page)
-        page.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity", page)
-        anim.setDuration(160)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.finished.connect(lambda: page.setGraphicsEffect(None))
-        anim.start(QPropertyAnimation.DeleteWhenStopped)
+        slide_in(self.stack.currentWidget())
 
     def show_review(self, project) -> None:
         self.review_page.load(project)

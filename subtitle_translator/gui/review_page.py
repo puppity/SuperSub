@@ -26,6 +26,8 @@ from ..export import export_project, mux_mkv, mux_path
 from ..translate.analyze import UNKNOWN_COLOR
 from ..translate.translate import make_chunks, translate_chunk
 from .theme import COLORS
+from .mpv_preview import MpvPreview, mpv_available
+from .icons import set_icon
 from .timeline_widget import TimelineWidget
 from .worker import CallWorker
 
@@ -370,8 +372,8 @@ class VideoPreview(QGraphicsView):
 class ReviewPage(QWidget):
     COLS = ["#", "เวลา", "คนพูด → พูดกับ", "ต้นฉบับ", "ไทย"]
     EXPORT_TEXT = "ส่งออก .srt + .ass"
-    PLAY_TEXT = "▶  เล่น"
-    PAUSE_TEXT = "⏸  หยุด"
+    PLAY_TEXT = "เล่น"
+    PAUSE_TEXT = "หยุดชั่วคราว"
 
     def __init__(self, settings: Settings, persist, parent=None):
         super().__init__(parent)
@@ -416,6 +418,7 @@ class ReviewPage(QWidget):
         head.addWidget(self.retry_failed_btn)
         self.export_btn = export = QPushButton(self.EXPORT_TEXT)
         export.setProperty("accent", True)
+        set_icon(export, "export", COLORS["on_accent"])
         export.clicked.connect(self.export)
         head.addWidget(export)
         root.addLayout(head)
@@ -431,16 +434,22 @@ class ReviewPage(QWidget):
         preview_box = QWidget()
         left = QVBoxLayout(preview_box)
         left.setContentsMargins(0, 0, 0, 0)
-        self.preview = VideoPreview()
+        # mpv plays the original file of any codec at once; the Qt player is the fallback.
+        self.preview = MpvPreview() if mpv_available() else VideoPreview()
         self.preview.setMinimumSize(240, 135)
         left.addWidget(self.preview, 1)
         controls = QHBoxLayout()
         controls.setSpacing(6)
         self.play_btn = play = QPushButton(self.PLAY_TEXT)
+        set_icon(play, "play")
+        play.setMinimumWidth(136)
         play.setToolTip("เล่น / หยุดชั่วคราว (F5)")
         play.clicked.connect(self.preview.toggle)
         controls.addWidget(play)
-        self.stop_btn = QPushButton("⏹")
+        self.stop_btn = QPushButton()
+        self.stop_btn.setProperty("icon", True)
+        self.stop_btn.setAccessibleName("หยุด")
+        set_icon(self.stop_btn, "stop")
         self.stop_btn.setToolTip("หยุด แล้วกลับไปต้นบรรทัดที่เลือก")
         self.stop_btn.clicked.connect(self.preview.stop)
         controls.addWidget(self.stop_btn)
@@ -462,7 +471,7 @@ class ReviewPage(QWidget):
         self._starts: list[float] = []
         self.preview.fallback_changed.connect(self._on_preview_fallback)
         self.preview.status_changed.connect(self._show_preview_status)
-        self.preview.playing_changed.connect(lambda on: play.setText(self.PAUSE_TEXT if on else self.PLAY_TEXT))
+        self.preview.playing_changed.connect(self._show_playing)
         self.preview.duration_changed.connect(self._on_duration)
         self.preview.position_changed.connect(self._on_position)
         self.left_split.addWidget(preview_box)
@@ -519,9 +528,11 @@ class ReviewPage(QWidget):
         self.cps_label = QLabel("")
         er.addWidget(self.cps_label)
         self.retranslate_btn = QPushButton("แปลบรรทัดนี้ใหม่")
+        set_icon(self.retranslate_btn, "refresh")
         self.retranslate_btn.clicked.connect(self.retranslate)
         er.addWidget(self.retranslate_btn)
         save = QPushButton("บันทึก (Ctrl+Enter)")
+        set_icon(save, "check")
         save.clicked.connect(self.save_edit)
         er.addWidget(save)
         el.addLayout(er)
@@ -537,6 +548,9 @@ class ReviewPage(QWidget):
 
         self.timeline = TimelineWidget()
         self.timeline.cue_clicked.connect(self.select)
+        self.timeline.seek_requested.connect(self.preview.seek)
+        self.preview.position_changed.connect(self.timeline.set_playhead)
+        self.preview.playing_changed.connect(self.timeline.set_following)
         self.outer_split.addWidget(self.timeline)
         self.outer_split.setStretchFactor(0, 1)
         self.outer_split.setStretchFactor(1, 0)
@@ -546,10 +560,14 @@ class ReviewPage(QWidget):
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.save_edit)
         QShortcut(QKeySequence("F5"), self, activated=self.preview.toggle)
 
+    def _show_playing(self, on: bool) -> None:
+        self.play_btn.setText(self.PAUSE_TEXT if on else self.PLAY_TEXT)
+        set_icon(self.play_btn, "pause" if on else "play")
+
     def _on_preview_fallback(self, still: bool) -> None:
         for w in (self.play_btn, self.stop_btn, self.seek_bar):
             w.setEnabled(not still)
-        self.play_btn.setText(self.PLAY_TEXT)
+        self._show_playing(False)
         self._show_preview_status("วิดีโอนี้เล่นในโปรแกรมไม่ได้ · แสดงภาพนิ่งของแต่ละบรรทัดแทน" if still else "")
 
     def _show_preview_status(self, text: str) -> None:
@@ -615,6 +633,7 @@ class ReviewPage(QWidget):
         self.cps_label.setText("")
         self.edit_label.setText("แก้บรรทัด")
         self.timeline.set_selected(None)
+        self.timeline.set_playhead(None)
         self.project = project
         ep = project.episode
         self.title.setText(Path(ep.video_path).name)
@@ -630,9 +649,10 @@ class ReviewPage(QWidget):
         self._duration = 0.0
         self.seek_bar.setRange(0, 0)
         self._update_time(0)
-        self.play_btn.setText(self.PLAY_TEXT)
+        self._show_playing(False)
         self.preview.set_source(ep.video_path)
         self.timeline.set_data(ep.cues, colors, names)
+        self._fit_timeline()
         self.filter_buttons["all"].setChecked(True)
         self.mode = "all"
         self._update_counts()
@@ -677,6 +697,7 @@ class ReviewPage(QWidget):
         ep = self.project.episode
         self._fill_chars()
         self.timeline.set_data(ep.cues, self._colors(), self._names())
+        self._fit_timeline()
         self.timeline.set_selected(self.current)
         current = self.current
         self._fill_table()
@@ -809,6 +830,21 @@ class ReviewPage(QWidget):
             if state is not None:
                 getattr(self, name).restoreState(state)
             getattr(self, name).splitterMoved.connect(self._save_splits)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_timeline()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_timeline)       # once the splitter has its real height
+
+    def _fit_timeline(self) -> None:
+        """Give the table any height the timeline cannot use (it never grows past its lanes)."""
+        top, low = self.outer_split.sizes()
+        cap = self.timeline.maximumHeight()
+        if low > cap:
+            self.outer_split.setSizes([top + low - cap, cap])
 
     def _save_splits(self, *_):
         store = self._split_store()

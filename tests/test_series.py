@@ -57,7 +57,7 @@ def test_memory_round_trip_keeps_user_notes_and_merges(tmp_path):
 def test_known_characters_keep_colour_and_thai_name(tmp_path):
     known = [Character("gou", "Gou", "โก", "male", color="#FBBF24", self_pronoun="ข้า")]
     ep = _ep(tmp_path, "Show - 02.mkv", [])
-    data = {"summary": "s", "glossary": [{"source": "WGP", "thai": "ดับเบิลยูจีพี"}], "cues": [],
+    data = {"series_title": "", "episode_number": 0, "summary": "s", "glossary": [{"source": "WGP", "thai": "ดับเบิลยูจีพี"}], "cues": [],
             "characters": [
                 {"key": "gou", "name_src": "Gou", "name_th": "โกะ", "gender": "male", "role": "",
                  "relations": [], "address_terms": [], "alignment": "villain",
@@ -105,3 +105,42 @@ def test_old_memory_without_voice_fields_still_loads_and_markdown_shows_voice():
     mem.characters[0].alignment, mem.characters[0].self_pronoun = "villain", "ข้า"
     md = mem.to_markdown()
     assert "ฝ่ายร้าย" in md and "แทนตัว ข้า" in md
+
+
+def test_ai_series_title_names_the_folder_and_episodes_sort(tmp_path):
+    from subtitle_translator.core.series import (display_title, episode_number, output_stem,
+                                                 remember_series, series_dir)
+    from subtitle_translator.export import output_paths
+    a = tmp_path / "[Grp] sousou no frieren 05 [1080p].mkv"
+    assert display_title(a) == "sousou no frieren"            # nothing known yet: the file name
+    assert remember_series(a, "Frieren: Beyond Journey's End", 5) == "Frieren: Beyond Journey's End"
+    assert series_dir(a, tmp_path / "out") == tmp_path / "out" / "Frieren_ Beyond Journey's End"
+    assert output_stem(a) == "Frieren_ Beyond Journey's End - EP05"
+    # A later answer for the same file naming never moves the folder.
+    b = tmp_path / "[Grp] sousou no frieren 12 [1080p].mkv"
+    assert remember_series(b, "Sousou no Frieren", 12) == "Frieren: Beyond Journey's End"
+    assert output_paths(b, str(tmp_path))[0].name == "Frieren_ Beyond Journey's End - EP12.th.srt"
+    # Another release group's naming of the same show joins the same folder.
+    c = tmp_path / "Frieren Beyond Journeys End - 07.mkv"
+    assert remember_series(c, "frieren: beyond journey's end", 7) == "Frieren: Beyond Journey's End"
+    # No number in the file name: the AI's episode number is used.
+    d = tmp_path / "Mystery Show finale.mkv"
+    assert episode_number(d) is None and output_stem(d) == "Mystery Show finale"
+    remember_series(d, "Mystery Show", 24)
+    assert episode_number(d) == 24 and output_stem(d) == "Mystery Show - EP24"
+
+
+def test_memory_follows_the_ai_title(tmp_path):
+    from subtitle_translator.core.series import (SeriesMemory, load_memory, memory_path,
+                                                 remember_series, save_memory)
+    out = tmp_path / "out"
+    ep1 = tmp_path / "show x - 01.mkv"
+    mem = SeriesMemory(title="show x", glossary={"WGP": "ดับเบิลยูจีพี"})
+    save_memory(ep1, mem, out)                    # written before the AI named the series
+    remember_series(ep1, "Show X Official", 1)
+    ep2 = tmp_path / "show x - 02.mkv"
+    got = load_memory(ep2, out)                   # still found under the old folder
+    assert got.title == "Show X Official" and got.glossary == {"WGP": "ดับเบิลยูจีพี"}
+    save_memory(ep2, got, out)
+    assert memory_path(ep2, out) == out / "Show X Official" / "Show X Official.series.md"
+    assert memory_path(ep2, out).exists()

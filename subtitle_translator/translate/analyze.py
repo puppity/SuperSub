@@ -6,7 +6,7 @@ from pathlib import Path
 from ..ai.backend import AIBackend, AIRequest, AIResult
 from ..core.frames import MAX_FACES, Frame, faces_dir, save_face
 from ..core.models import Character, Episode
-from ..core.series import SeriesMemory
+from ..core.series import SeriesMemory, remember_series
 from .prompts import ANALYZE_SCHEMA, SYSTEM_ANALYZE, VISION_NOTE, _mmss, format_cues, source_header, vision_schema
 
 log = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ def build_analyze_request(ep: Episode, effort: str, memory: str = "",
         images.append((f'REFERENCE FACE of known character key "{ch.key}" ({ch.name_th}):', path.read_bytes()))
     for f in frames or []:
         images.append((f"FRAME at {_mmss(f.time)}, during line {f.cue_id}:", f.path.read_bytes()))
-    context = (source_header(ep)
+    context = (f"File name: {Path(ep.video_path).name}\n" + source_header(ep)
                + (VISION_NOTE + "\n" if images else "")
                + (memory + "\n\n" if memory else "")
                + "Columns: id, start time, duration, Name/Actor/style tag, text\n\n"
@@ -104,6 +104,10 @@ def analyze(ep: Episode, backend: AIBackend, effort: str, memory: SeriesMemory |
     faces = known_faces(memory, ep.video_path, out_dir) if frames else None
     res = backend.run_json(build_analyze_request(ep, effort, block, frames, faces))
     apply_analysis(ep, res.data, memory.characters if memory else None)
+    # Name the series folder before anything is written into it (faces, memory, subtitles).
+    title = remember_series(ep.video_path, res.data.get("series_title", ""), res.data.get("episode_number"))
+    if memory is not None:
+        memory.title = title
     if frames:
         keep_faces(ep, res.data, frames, out_dir)
     return res

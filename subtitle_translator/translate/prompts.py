@@ -25,6 +25,8 @@ Read every line. Work out:
 4. A Thai summary of the episode in at most 5 sentences.
 5. A glossary of recurring proper nouns and special terms (machines, places, techniques, teams) with one fixed Thai rendering each.
 6. For each character: their side in the story (hero, villain, neutral, or unknown) and the Thai voice that fits them. Give the word they use for "I" (e.g. ผม, ฉัน, หนู, เรา, ข้า, กู, ข้าพเจ้า), their usual word for "you" (e.g. คุณ, นาย, เธอ, แก, เจ้า, มึง, ท่าน), and a short Thai note on their register and how it changes with the listener. Base it on the source: 俺/貴様/てめえ, arrogant or threatening speech and villain roles suit ข้า/แก or กู/มึง; polite heroes suit ผม/ฉัน with คุณ/นาย/เธอ; elders and royalty suit ข้า/เจ้า; children often use หนู. Keep it natural for Thai subtitles.
+7. The series: series_title is the title the show is best known by (its official English or romaji title, as streaming sites list it), without episode numbers, season words or release-group tags; take it from the file name and the content. episode_number is the episode number if the file name or the subtitles show it, else 0.
+If SERIES MEMORY from earlier episodes is given, copy its "series" value as series_title exactly.
 If SERIES MEMORY from earlier episodes is given: reuse the same key, Thai name and address terms for every character already listed, keep glossary renderings, and only add characters or terms that are new.
 Use evidence such as names and honorifics, gendered speech (〜わ, 〜ぜ, 僕, 俺, あたし), who answers whom, and the Name/Actor or style tag shown in the third column when present.
 Never invent characters who do not speak. Line ids are integers and must be copied exactly."""
@@ -44,8 +46,10 @@ Rules:
 ANALYZE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "characters", "glossary", "cues"],
+    "required": ["series_title", "episode_number", "summary", "characters", "glossary", "cues"],
     "properties": {
+        "series_title": {"type": "string"},
+        "episode_number": {"type": "integer"},
         "summary": {"type": "string"},
         "glossary": {
             "type": "array",

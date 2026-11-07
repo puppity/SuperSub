@@ -59,14 +59,14 @@ def test_export_project_paths_and_overwrite(tmp_path):
         c.thai = "ไทย"
     p = Project(episode=ep, backend="api", model="claude-opus-5-5")
     srt, ass = export_project(p, Settings())
-    assert (srt.name, ass.name) == ("EP01.th.srt", "EP01.th.ass")
+    series = tmp_path.name                    # "EP01.mkv" has no title: its folder names the series
+    assert (srt.name, ass.name) == (f"{series} - EP01.th.srt", f"{series} - EP01.th.ass")
     with pytest.raises(FileExistsError):
         export_project(p, Settings())
     export_project(p, Settings(), overwrite=True)
-    series = tmp_path.name                    # "EP01.mkv" has no title: its folder names the series
     assert srt.parent == tmp_path              # already in a folder named after the series: no nesting
-    assert output_paths(ep.video_path, str(tmp_path / "out"))[0] == tmp_path / "out" / series / "EP01.th.srt"
-    assert output_paths("D:/x/Show - 01.mkv", "E:/out")[0] == Path("E:/out/Show/Show - 01.th.srt")
+    assert output_paths(ep.video_path, str(tmp_path / "out"))[0] == tmp_path / "out" / series / f"{series} - EP01.th.srt"
+    assert output_paths("D:/x/Show - 01.mkv", "E:/out")[0] == Path("E:/out/Show/Show - EP01.th.srt")
 
 
 ORIG = """[Script Info]
@@ -116,7 +116,7 @@ def test_non_integer_playres_keeps_effect_lines(tmp_path):
 
 
 def test_export_refuses_to_overwrite_source_subtitle(tmp_path):
-    src = tmp_path / "EP01.th.srt"
+    src = tmp_path / f"{tmp_path.name} - EP01.th.srt"
     src.write_text("1\n00:00:01,000 --> 00:00:02,000\nkeep me\n", encoding="utf-8")
     ep = make_episode(1)
     ep.video_path = str(tmp_path / "EP01.mkv")

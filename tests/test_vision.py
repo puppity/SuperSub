@@ -20,7 +20,7 @@ CHAR = {"key": "gou", "name_src": "Gou", "name_th": "โก", "gender": "male", 
 
 
 def data(face_line=2):
-    return {"summary": "s", "glossary": [], "cues": [{"id": 2, "speaker": "gou", "addressee": "", "confidence": 0.9}],
+    return {"series_title": "", "episode_number": 0, "summary": "s", "glossary": [], "cues": [{"id": 2, "speaker": "gou", "addressee": "", "confidence": 0.9}],
             "characters": [dict(CHAR, face_line=face_line)]}
 
 

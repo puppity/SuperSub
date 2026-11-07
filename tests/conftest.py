@@ -28,6 +28,13 @@ class _MemoryKeyring(KeyringBackend):
 
 
 @pytest.fixture(autouse=True)
+def _series_registry(tmp_path, monkeypatch):
+    """Series names the AI found go to a per-test file, never the user's real one."""
+    from subtitle_translator.core import series
+    monkeypatch.setattr(series, "registry_path", lambda: tmp_path / "series_names.json")
+
+
+@pytest.fixture(autouse=True)
 def _in_memory_keyring():
     """No test may touch the real Windows Credential Manager."""
     previous = keyring.core._keyring_backend      # read the slot directly: get_keyring() would probe backends
