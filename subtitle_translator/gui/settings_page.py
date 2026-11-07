@@ -43,6 +43,7 @@ class SettingsPage(QWidget):
         self._worker: CallWorker | None = None
 
         body = QWidget()
+        body.setMaximumWidth(960)          # full-width fields on a wide window read as a spreadsheet
         col = QVBoxLayout(body)
         col.setContentsMargins(32, 28, 32, 28)
         col.setSpacing(8)
@@ -165,8 +166,13 @@ class SettingsPage(QWidget):
         col.addWidget(out)
         col.addStretch(1)
 
+        holder = QWidget()
+        hl = QHBoxLayout(holder)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(body, 1)
+        hl.addStretch(0)
         scroll = QScrollArea(widgetResizable=True, frameShape=QFrame.NoFrame)
-        scroll.setWidget(body)
+        scroll.setWidget(holder)
         QVBoxLayout(self).addWidget(scroll)
         self.layout().setContentsMargins(0, 0, 0, 0)
 

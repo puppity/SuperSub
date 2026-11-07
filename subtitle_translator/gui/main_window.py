@@ -2,17 +2,40 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QMainWindow, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QButtonGroup, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QMainWindow, QStackedWidget, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from ..core.settings import Settings, save_settings
 from .queue_page import QueuePage
 from .review_page import ReviewPage
 from .settings_page import SettingsPage
+from .theme import COLORS
 
-NAV = [("คิวงาน", "☰"), ("ตรวจ/แก้", "✎"), ("ตั้งค่า", "⚙")]
+# Glyphs from Segoe Fluent Icons (Windows 11) / Segoe MDL2 Assets (Windows 10): same code points.
+NAV = [("คิวงาน", ""), ("ตรวจ/แก้", ""), ("ตั้งค่า", "")]
+
+
+def glyph_icon(glyph: str) -> QIcon:
+    """A two-state icon drawn from an icon-font glyph: dim when off, bright when selected."""
+    icon = QIcon()
+    for state, color in ((QIcon.Off, COLORS["text3"]), (QIcon.On, COLORS["accent"])):
+        pix = QPixmap(48, 48)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        font = QFont("Segoe Fluent Icons")
+        font.setFamilies(["Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe UI Symbol"])
+        font.setPixelSize(30)
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        painter.drawText(pix.rect(), Qt.AlignCenter, glyph)
+        painter.end()
+        icon.addPixmap(pix, QIcon.Normal, state)
+    return icon
 
 
 class MainWindow(QMainWindow):
@@ -24,17 +47,20 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
 
         rail = QFrame(objectName="rail")
-        rail.setFixedWidth(76)
+        rail.setFixedWidth(84)
         rail_layout = QVBoxLayout(rail)
-        rail_layout.setContentsMargins(6, 16, 6, 16)
-        rail_layout.setSpacing(6)
+        rail_layout.setContentsMargins(8, 16, 8, 16)
+        rail_layout.setSpacing(8)
         self.nav_group = QButtonGroup(self)
         self.nav_buttons: list[QToolButton] = []
         for i, (label, glyph) in enumerate(NAV):
-            b = QToolButton(text=f"{glyph}\n{label}", checkable=True)
+            b = QToolButton(text=label, checkable=True)
             b.setProperty("nav", True)
-            b.setFixedSize(64, 56)
-            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            b.setIcon(glyph_icon(glyph))
+            b.setIconSize(QSize(24, 24))
+            b.setFixedSize(68, 64)
+            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setCursor(Qt.PointingHandCursor)
             b.setAccessibleName(label)
             self.nav_group.addButton(b, i)
             self.nav_buttons.append(b)
@@ -61,8 +87,24 @@ class MainWindow(QMainWindow):
         self.go(0)
 
     def go(self, index: int) -> None:
-        self.stack.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
+        if self.stack.currentIndex() == index:
+            return
+        self.stack.setCurrentIndex(index)
+        self._fade_in(self.stack.currentWidget())
+
+    def _fade_in(self, page: QWidget) -> None:
+        """Short fade on page switch. The effect is removed afterwards: a live opacity
+        effect forces offscreen rendering of the whole page (and its video view)."""
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", page)
+        anim.setDuration(160)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(lambda: page.setGraphicsEffect(None))
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
 
     def show_review(self, project) -> None:
         self.review_page.load(project)

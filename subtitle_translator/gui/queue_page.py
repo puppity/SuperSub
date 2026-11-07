@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QProgressBar,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -20,7 +23,7 @@ from ..core.settings import Settings, cache_dir
 from ..core.subio import SubtitleReadError
 from ..export import export_project
 from ..translate.pipeline import Stopped, estimate_project_cost, prepare_project, run_project
-from .theme import COLORS
+from .theme import set_tone
 
 log = logging.getLogger(__name__)
 VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".webm", ".avi"}
@@ -64,7 +67,7 @@ class QueueRunner(QThread):
     item_progress = Signal(int, str, float)
     item_done = Signal(int, object)
     item_failed = Signal(int, str)
-    paused = Signal(str)
+    paused = Signal(str, str)                  # message, AIErrorKind value ("" when user-stopped)
 
     def __init__(self, jobs: list[tuple[int, QueueItem]], settings: Settings, parent=None):
         super().__init__(parent)
@@ -78,7 +81,7 @@ class QueueRunner(QThread):
     def run(self) -> None:
         for row, item in self.jobs:
             if self._stop:
-                self.paused.emit("หยุดแล้ว — กดเริ่มเพื่อทำต่อ")
+                self.paused.emit("หยุดแล้ว — กดเริ่มเพื่อทำต่อ", "")
                 return
             try:
                 backend = make_backend(self.settings)
@@ -88,12 +91,12 @@ class QueueRunner(QThread):
                                       lambda: self._stop)
                 self.item_done.emit(row, project)
             except Stopped:
-                self.paused.emit("หยุดแล้ว — กดเริ่มเพื่อทำต่อ")
+                self.paused.emit("หยุดแล้ว — กดเริ่มเพื่อทำต่อ", "")
                 return
             except AIError as exc:
                 self.item_failed.emit(row, friendly(exc))
                 if exc.kind in STOP_QUEUE:
-                    self.paused.emit(friendly(exc))
+                    self.paused.emit(friendly(exc), exc.kind.value)
                     return
             except (MediaError, SubtitleReadError, ProjectFileError) as exc:
                 self.item_failed.emit(row, str(exc))
@@ -159,48 +162,95 @@ class EstimateRunner(QThread):
                 self.estimated.emit(row, None)
 
 
+def status_tone(item: QueueItem) -> str | None:
+    if item.error or item.status == "ผิดพลาด":
+        return "bad"
+    if item.project is not None and item.project.stage == "done":
+        return "warn" if "ต้องแปลเอง" in item.status else "good"
+    if item.status.endswith("%"):
+        return "busy"
+    return None
+
+
 class FileCard(QFrame):
     def __init__(self, on_action, parent=None):
         super().__init__(parent)
         self.setProperty("card", True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setContentsMargins(18, 14, 14, 14)
+        lay.setSpacing(8)
         top = QHBoxLayout()
+        top.setSpacing(12)
         text = QVBoxLayout()
+        text.setSpacing(2)
         self.name = QLabel()
         self.name.setProperty("role", "h2")
         self.meta = QLabel()
         self.meta.setProperty("role", "muted")
+        self.meta.setWordWrap(True)
         text.addWidget(self.name)
         text.addWidget(self.meta)
         top.addLayout(text, 1)
         self.status = QLabel()
+        self.status.setProperty("role", "pill")
         self.cost = QLabel()
-        self.cost.setMinimumWidth(70)
+        self.cost.setProperty("role", "muted")
         self.cost.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.action = QPushButton()
+        self.action.setCursor(Qt.PointingHandCursor)
         self.action.clicked.connect(on_action)
-        top.addWidget(self.status)
-        top.addWidget(self.cost)
-        top.addWidget(self.action)
+        top.addWidget(self.status, 0, Qt.AlignVCenter)
+        top.addWidget(self.cost, 0, Qt.AlignVCenter)
+        top.addWidget(self.action, 0, Qt.AlignVCenter)
         lay.addLayout(top)
         self.bar = QProgressBar(textVisible=False, maximum=1000)
+        self.bar.setVisible(False)
         lay.addWidget(self.bar)
+        self._anim = QPropertyAnimation(self.bar, b"value", self)
+        self._anim.setDuration(350)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def set_progress(self, value: int) -> None:
+        """Glide the bar to `value` instead of jumping, so progress reads as motion."""
+        self.bar.setVisible(True)
+        self._anim.stop()
+        if value <= self.bar.value():
+            self.bar.setValue(value)
+            return
+        self._anim.setStartValue(self.bar.value())
+        self._anim.setEndValue(value)
+        self._anim.start()
 
     def update_from(self, item: QueueItem) -> None:
         self.name.setText(item.video.name)
-        self.meta.setText(item.error or item.meta)
-        self.status.setText(item.status)
-        color = COLORS["bad"] if item.error else COLORS["text2"]
-        self.status.setStyleSheet(f"color: {color};")
+        meta = item.error or item.meta
+        if self.meta.text() != meta:
+            self.meta.setText(meta)
+        if self.status.text() != item.status:
+            self.status.setText(item.status)
+        set_tone(self.status, status_tone(item))
         if item.project and item.project.cost_usd:
-            self.cost.setText(f"${item.project.cost_usd:.2f}")
+            cost = f"${item.project.cost_usd:.2f}"
         elif item.estimate is not None:
-            self.cost.setText(f"~${item.estimate:.2f}")
+            cost = f"~${item.estimate:.2f}"
         else:
-            self.cost.setText("—")
+            cost = ""                       # no number to show (e.g. Claude Max): show nothing, not a dash
+        self.cost.setText(cost)
+        self.cost.setVisible(bool(cost))
         done = item.project is not None and item.project.stage == "done"
-        self.action.setText("ตรวจ/แก้" if done else ("เลือกแทร็ก" if item.source is None and "เลือก" in item.meta else "ลบ"))
+        if done:
+            label = "ตรวจ/แก้"
+        elif item.source is None and "เลือก" in item.meta:
+            label = "เลือกแทร็ก"
+        else:
+            label = "ลบ"
+        self.action.setText(label)
+        primary = label != "ลบ"
+        if self.action.property("accent") != primary:
+            self.action.setProperty("accent", primary)
+            self.action.setProperty("flat", not primary)
+            self.action.style().unpolish(self.action)
+            self.action.style().polish(self.action)
 
 
 class QueuePage(QWidget):
@@ -240,9 +290,14 @@ class QueuePage(QWidget):
         left.addLayout(head)
         drop = QLabel("ลากไฟล์ .mkv หรือทั้งโฟลเดอร์มาวางที่นี่ · ระบบหาแทร็กซับญี่ปุ่น/อังกฤษ และไฟล์ .srt/.ass ข้างวิดีโอให้เอง")
         drop.setWordWrap(True)
-        drop.setStyleSheet(f"border: 1.5px dashed {COLORS['stroke2']}; border-radius: 10px; padding: 16px; color: {COLORS['text2']};")
+        drop.setStyleSheet("border: 1.5px dashed #3C3C3C; border-radius: 12px; padding: 18px; color: #C8C8C8;")
         left.addWidget(drop)
         self.list_box = QVBoxLayout()
+        self.list_box.setSpacing(10)
+        self.empty = QLabel("ยังไม่มีไฟล์ในคิว\nเริ่มจากกด “+ เพิ่มไฟล์” หรือลากวิดีโอมาวาง")
+        self.empty.setProperty("role", "empty")
+        self.empty.setAlignment(Qt.AlignCenter)
+        self.list_box.addWidget(self.empty)
         self.list_box.addStretch(1)
         holder = QWidget()
         holder.setLayout(self.list_box)
@@ -255,17 +310,18 @@ class QueuePage(QWidget):
         side.setProperty("card", True)
         side.setFixedWidth(340)
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(20, 20, 20, 20)
+        sl.setContentsMargins(22, 22, 22, 22)
+        sl.setSpacing(8)
         h = QLabel("สรุปก่อนเริ่ม")
         h.setProperty("role", "h2")
         sl.addWidget(h)
-        sl.addWidget(QLabel("เชื่อมต่อผ่าน"))
+        sl.addWidget(self._field_label("เชื่อมต่อผ่าน"))
         self.backend_box = QComboBox()
         self.backend_box.addItems(["Anthropic API key", "Claude Code (บัญชี Max)"])
         self.backend_box.setCurrentIndex(1 if self.s.backend == "claude_code" else 0)
         self.backend_box.currentIndexChanged.connect(self._backend_changed)
         sl.addWidget(self.backend_box)
-        sl.addWidget(QLabel("โมเดลแปล"))
+        sl.addWidget(self._field_label("โมเดลแปล"))
         self.model_box = QComboBox()
         for mid, info in MODELS.items():
             self.model_box.addItem(info.label + (" · แนะนำ" if info.recommended else ""), mid)
@@ -273,12 +329,15 @@ class QueuePage(QWidget):
             self.model_box.setCurrentIndex(list(MODELS).index(self.s.model))
         self.model_box.currentIndexChanged.connect(self._model_changed)
         sl.addWidget(self.model_box)
+        sl.addWidget(self._field_label("ค่าใช้จ่ายโดยประมาณ"))
         self.total = QLabel()
-        self.total.setProperty("role", "h1")
+        self.total.setProperty("role", "stat")
+        self.total.setWordWrap(True)
         sl.addWidget(self.total)
-        est = QPushButton("ประมาณราคา")
-        est.clicked.connect(self.estimate)
-        sl.addWidget(est)
+        self.est_btn = QPushButton("ประมาณราคา")
+        self.est_btn.clicked.connect(self.estimate)
+        sl.addWidget(self.est_btn)
+        sl.addSpacing(6)
         self.start_btn = QPushButton("เริ่มแปลทั้งคิว")
         self.start_btn.setProperty("accent", True)
         self.start_btn.clicked.connect(self.start)
@@ -287,15 +346,46 @@ class QueuePage(QWidget):
         export_all = QPushButton("ส่งออกไฟล์ที่เสร็จทั้งหมด")
         export_all.clicked.connect(self.export_all)
         for b in (self.start_btn, self.stop_btn, export_all):
+            b.setCursor(Qt.PointingHandCursor)
             sl.addWidget(b)
+        sl.addSpacing(6)
         self.message = QLabel("หยุดได้ทุกเมื่อ ผลที่เสร็จแล้วบันทึกไว้ กลับมาทำต่อไม่เสียเงินซ้ำ")
         self._idle_message = self.message.text()
         self.message.setWordWrap(True)
-        self.message.setProperty("role", "muted")
+        self.message.setProperty("role", "hint")
         sl.addWidget(self.message)
+        self.login_btn = QPushButton("เปิด Terminal เพื่อล็อกอิน Claude")
+        self.login_btn.setCursor(Qt.PointingHandCursor)
+        self.login_btn.clicked.connect(self.open_login)
+        self.login_btn.setVisible(False)
+        sl.addWidget(self.login_btn)
         sl.addStretch(1)
         outer.addWidget(side)
         self._refresh_total()
+
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setProperty("role", "field")
+        return label
+
+    def _say(self, text: str, bad: bool = False) -> None:
+        self.message.setText(text)
+        set_tone(self.message, "bad" if bad else None)
+        if not bad:
+            self.login_btn.setVisible(False)
+
+    def open_login(self) -> None:
+        """Open a console running `claude` so the user can sign in to their Max account."""
+        exe = shutil.which("claude")
+        if exe is None:
+            self._say("ไม่พบคำสั่ง claude — ติดตั้ง Claude Code ก่อน แล้วลองใหม่", bad=True)
+            return
+        if sys.platform == "win32":
+            subprocess.Popen(["cmd", "/k", exe], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        else:
+            subprocess.Popen([exe])
+        self._say("ล็อกอินในหน้าต่าง Terminal ให้เสร็จ แล้วกด “เริ่มแปลทั้งคิว” อีกครั้ง")
 
     # ----- adding files -----
     def dragEnterEvent(self, e):
@@ -343,7 +433,7 @@ class QueuePage(QWidget):
         probe.finished.connect(self._on_probe_finished)
         self.prober = probe
         self.start_btn.setEnabled(False)
-        self.message.setText("กำลังตรวจแทร็กซับ…")
+        self._say("กำลังตรวจแทร็กซับ…")
         probe.start()
 
     def _on_probed(self, v: Path, tracks, error: str) -> None:
@@ -374,7 +464,7 @@ class QueuePage(QWidget):
         running = self.runner is not None
         self.start_btn.setEnabled(not running)
         if not running:
-            self.message.setText(self._idle_message)
+            self._say(self._idle_message)
         self._refresh_total()
 
     def _append(self, item: QueueItem, cands: list[SubTrack] | None = None) -> None:
@@ -384,6 +474,7 @@ class QueuePage(QWidget):
         card._cands = cands or []
         self.cards.append(card)
         self.list_box.insertWidget(self.list_box.count() - 1, card)
+        self.empty.setVisible(False)
         card.update_from(item)
 
     def _action(self, row: int) -> None:
@@ -403,6 +494,7 @@ class QueuePage(QWidget):
             for r, c in enumerate(self.cards):
                 c.action.clicked.disconnect()
                 c.action.clicked.connect(lambda _=False, rr=r: self._action(rr))
+            self.empty.setVisible(not self.cards)
             self._refresh_total()
 
     def _busy(self) -> bool:
@@ -468,8 +560,10 @@ class QueuePage(QWidget):
         self._refresh_total()
 
     def _refresh_total(self) -> None:
-        if self.s.backend == "claude_code":
-            self.total.setText("ใช้โควตา Max")
+        max_plan = self.s.backend == "claude_code"
+        self.est_btn.setVisible(not max_plan)
+        if max_plan:
+            self.total.setText("ไม่เสียเงินเพิ่ม · ใช้โควตา Max")
             return
         total = sum(it.estimate or 0 for it in self.items if it.source is not None)
         self.total.setText(f"~${total:.2f}")
@@ -481,10 +575,10 @@ class QueuePage(QWidget):
         if not jobs or self._closing or self.runner is not None:
             return
         if self.prober is not None or self._probe_queue:
-            self.message.setText("กำลังตรวจแทร็กซับ รอสักครู่…")
+            self._say("กำลังตรวจแทร็กซับ รอสักครู่…")
             return
         if self.estimator is not None:
-            self.message.setText("กำลังประมาณราคา รอสักครู่…")
+            self._say("กำลังประมาณราคา รอสักครู่…")
             return
         runner = QueueRunner(jobs, self.s)
         runner.item_progress.connect(self._on_progress)
@@ -498,18 +592,18 @@ class QueuePage(QWidget):
         self.stop_btn.setEnabled(True)
         self.backend_box.setEnabled(False)
         self.model_box.setEnabled(False)
-        self.message.setText("กำลังแปล…")
+        self._say("กำลังแปล…")
         runner.start()
 
     def stop(self) -> None:
         if self.runner:
             self.runner.stop()
-            self.message.setText("กำลังหยุดหลังจบช่วงปัจจุบัน…")
+            self._say("กำลังหยุดหลังจบช่วงปัจจุบัน…")
 
     def _on_progress(self, row: int, stage: str, frac: float) -> None:
         item = self.items[row]
         item.status, item.error = f"{stage} {int(frac * 100)}%", None
-        self.cards[row].bar.setValue(int(frac * 1000))
+        self.cards[row].set_progress(int(frac * 1000))
         self.cards[row].update_from(item)
 
     def _on_done(self, row: int, project) -> None:
@@ -518,7 +612,7 @@ class QueuePage(QWidget):
         failed = sum(1 for c in project.episode.cues if c.status == "failed")
         if failed:
             item.status = f"พร้อมตรวจ · ต้องแปลเอง {failed} บรรทัด"
-        self.cards[row].bar.setValue(1000)
+        self.cards[row].set_progress(1000)
         self.cards[row].update_from(item)
 
     def _on_failed(self, row: int, msg: str) -> None:
@@ -526,9 +620,36 @@ class QueuePage(QWidget):
         item.status, item.error = "ผิดพลาด", msg
         self.cards[row].update_from(item)
 
-    def _on_paused(self, msg: str) -> None:
+    def _on_paused(self, msg: str, kind: str = "") -> None:
         self._paused = True
-        self.message.setText(msg)
+        self._say(msg, bad=bool(kind))
+        needs_login = kind in (AIErrorKind.AUTH.value, AIErrorKind.NOT_INSTALLED.value)
+        needs_login = needs_login and self.s.backend == "claude_code"
+        self.login_btn.setVisible(needs_login)
+        if needs_login:
+            self._prompt_login(msg)
+
+    def _prompt_login(self, msg: str) -> None:
+        """Pop the sign-in prompt by itself instead of leaving the user to find the hint.
+
+        Non-modal (open(), not exec()) so a queued finished signal is never stuck behind it.
+        """
+        if getattr(self, "_login_box", None) is not None and self._login_box.isVisible():
+            return
+        box = QMessageBox(QMessageBox.Information, "ต้องล็อกอิน Claude ก่อน",
+                          "โหมด Claude Max ต้องล็อกอินบัญชี Claude ในเครื่องนี้ก่อนแปล\n\n"
+                          "กด “ล็อกอินตอนนี้” โปรแกรมจะเปิดหน้าต่าง Terminal ให้ "
+                          "ทำตามขั้นตอนในหน้าต่างนั้นจนเสร็จ แล้วกลับมากด “เริ่มแปลทั้งคิว” อีกครั้ง",
+                          parent=self)
+        box.setInformativeText(msg)
+        login = box.addButton("ล็อกอินตอนนี้", QMessageBox.AcceptRole)
+        box.addButton("ไว้ทีหลัง", QMessageBox.RejectRole)
+        box.setDefaultButton(login)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.buttonClicked.connect(lambda btn: self.open_login() if btn is login else None)
+        box.finished.connect(lambda _=0: setattr(self, "_login_box", None))   # box deletes itself on close
+        self._login_box = box
+        box.open()
 
     def _on_finished(self) -> None:
         if self.runner is not None:
@@ -542,7 +663,7 @@ class QueuePage(QWidget):
             self.start_btn.setEnabled(False)
         self._kick_estimator()
         if not self._paused:
-            self.message.setText("เสร็จแล้ว — กด ตรวจ/แก้ ที่แต่ละไฟล์")
+            self._say("เสร็จแล้ว — กด ตรวจ/แก้ ที่แต่ละไฟล์")
 
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         """Stop and join every background thread. True when nothing is left running."""
@@ -582,4 +703,4 @@ class QueuePage(QWidget):
                 self.cards[self.items.index(it)].update_from(it)
                 continue
             written += 1
-        self.message.setText(f"ส่งออกแล้ว {written} ไฟล์")
+        self._say(f"ส่งออกแล้ว {written} ไฟล์")

@@ -614,3 +614,47 @@ def test_character_color_double_click(qtbot, tmp_path, monkeypatch, no_real_ai):
     assert p.episode.character("yuki").color == "#12ABEF"
     page.chars.itemDoubleClicked.emit(page.chars.item(page.chars.count() - 1))   # "unknown" row: ignored
     assert p.episode.character("yuki").color == "#12ABEF"
+
+
+def test_review_edit_updates_row_in_place_and_search_is_debounced(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr("subtitle_translator.gui.review_page.grab_frame", lambda *a, **k: tmp_path / "x.png")
+    p = review_project(tmp_path)
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(p)
+    rebuilds = []
+    original = page._fill_table
+    monkeypatch.setattr(page, "_fill_table", lambda: (rebuilds.append(1), original())[1])
+    page.select(2)
+    page.editor.setPlainText("แก้ในแถว")
+    page.save_edit()
+    assert rebuilds == []                                  # edit refreshed one row, no full rebuild
+    assert page.table.item(page._row_of[2], 4).text() == "แก้ในแถว"
+    page.search.setText("ไทย 4")
+    assert page.table.rowCount() == 4                      # not yet: waits for the typing pause
+    qtbot.waitUntil(lambda: page.table.rowCount() == 1, timeout=2000)
+
+
+def test_auth_pause_pops_login_prompt_for_claude_max(qtbot, monkeypatch):
+    from subtitle_translator.gui.queue_page import QueuePage
+    page = QueuePage(Settings(backend="claude_code"), lambda: None)
+    qtbot.addWidget(page)
+    opened = []
+    monkeypatch.setattr(page, "open_login", lambda: opened.append(1))
+    page._on_paused("Claude Code ยังไม่ได้ล็อกอิน", "auth")
+    box = page._login_box
+    assert box.isVisible() and not page.login_btn.isHidden()
+    login = next(b for b in box.buttons() if b.text() == "ล็อกอินตอนนี้")
+    login.click()
+    assert opened == [1]
+    page._on_paused("หยุดแล้ว — กดเริ่มเพื่อทำต่อ", "")     # a plain user stop must not nag
+    assert page.login_btn.isHidden()
+
+
+def test_api_backend_auth_pause_does_not_offer_claude_login(qtbot):
+    from subtitle_translator.gui.queue_page import QueuePage
+    page = QueuePage(Settings(backend="api"), lambda: None)
+    qtbot.addWidget(page)
+    page._on_paused("API key ไม่ถูกต้อง", "auth")
+    assert page.login_btn.isHidden()
+    assert getattr(page, "_login_box", None) is None

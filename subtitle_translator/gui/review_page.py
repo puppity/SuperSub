@@ -207,7 +207,12 @@ class ReviewPage(QWidget):
             self.filter_buttons[mode] = b
             head.addWidget(b)
         self.search = QLineEdit(placeholderText="ค้นหาคำ…")
-        self.search.textChanged.connect(lambda _: self._fill_table())
+        # Rebuilding the table on every keystroke made typing stutter; wait for a pause.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(220)
+        self._search_timer.timeout.connect(self._fill_table)
+        self.search.textChanged.connect(lambda _: self._search_timer.start())
         head.addWidget(self.search)
         self.retry_failed_btn = QPushButton(RETRY_ALL_TEXT)
         self.retry_failed_btn.clicked.connect(self.retranslate_failed)
@@ -246,6 +251,14 @@ class ReviewPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setWordWrap(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        # Fixed two-line rows: resizeRowsToContents() re-laid out every wrapped cell on each
+        # refresh and was the main source of lag on long episodes.
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.table.verticalHeader().setDefaultSectionSize(52)
+        self._row_of: dict[int, int] = {}
         hh = self.table.horizontalHeader()
         for i, mode in enumerate([QHeaderView.ResizeToContents] * 3 + [QHeaderView.Stretch] * 2):
             hh.setSectionResizeMode(i, mode)
@@ -375,25 +388,45 @@ class ReviewPage(QWidget):
             return
         ep = self.project.episode
         ids = filter_ids(ep.cues, self.mode, self.search.text())
+        by_id = {c.id: c for c in ep.cues}          # ep.cue() is a linear scan: O(n²) per refresh
         names, colors = self._names(), self._colors()
+        self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
+        self.table.clearContents()
         self.table.setRowCount(len(ids))
+        self._row_of = {}
         for row, cue_id in enumerate(ids):
-            c = ep.cue(cue_id)
-            who = f"{names.get(c.speaker, 'ไม่ทราบ')} → {c.addressee or '?'}"
-            if c.speaker is None or c.speaker_conf < UNSURE_THRESHOLD:
-                who += "  ⚠"
-            values = [str(c.id), f"{int(c.start // 60):02d}:{c.start % 60:04.1f}", who, c.src, c.thai or "—"]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setData(Qt.UserRole, c.id)
-                if col == 2:
-                    item.setForeground(QColor(colors.get(c.speaker, UNKNOWN_COLOR)))
-                if col == 4 and c.status == "failed":
-                    item.setForeground(QColor(COLORS["bad"]))
-                self.table.setItem(row, col, item)
+            self._set_row(row, by_id[cue_id], names, colors)
         self.table.blockSignals(False)
-        self.table.resizeRowsToContents()
+        self.table.setUpdatesEnabled(True)
+
+    def _set_row(self, row: int, c: Cue, names: dict, colors: dict) -> None:
+        self._row_of[c.id] = row
+        who = f"{names.get(c.speaker, 'ไม่ทราบ')} → {c.addressee or '?'}"
+        if c.speaker is None or c.speaker_conf < UNSURE_THRESHOLD:
+            who += "  ⚠"
+        values = [str(c.id), f"{int(c.start // 60):02d}:{c.start % 60:04.1f}", who, c.src, c.thai or "—"]
+        for col, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setData(Qt.UserRole, c.id)
+            if col == 2:
+                item.setForeground(QColor(colors.get(c.speaker, UNKNOWN_COLOR)))
+            if col == 4 and c.status == "failed":
+                item.setForeground(QColor(COLORS["bad"]))
+            if col >= 3:
+                item.setToolTip(value)
+            self.table.setItem(row, col, item)
+
+    def _refresh_row(self, cue_id: int) -> None:
+        """Update one row in place; fall back to a rebuild if it left the current filter."""
+        row = self._row_of.get(cue_id)
+        c = self.project.episode.cue(cue_id)
+        if row is None or cue_id not in filter_ids([c], self.mode, self.search.text()):
+            self._fill_table()
+            return
+        self.table.blockSignals(True)
+        self._set_row(row, c, self._names(), self._colors())
+        self.table.blockSignals(False)
 
     # ----- selection & editing -----
     def _on_row(self) -> None:
@@ -413,12 +446,12 @@ class ReviewPage(QWidget):
         self.preview.show_cue(c, c.thai or c.src, self._colors().get(c.speaker, UNKNOWN_COLOR))
         self.timeline.set_selected(cue_id)
         if not from_table:
-            for row in range(self.table.rowCount()):
-                if self.table.item(row, 0).data(Qt.UserRole) == cue_id:
-                    self.table.blockSignals(True)
-                    self.table.selectRow(row)
-                    self.table.blockSignals(False)
-                    break
+            row = self._row_of.get(cue_id)
+            if row is not None:
+                self.table.blockSignals(True)
+                self.table.selectRow(row)
+                self.table.blockSignals(False)
+                self.table.scrollToItem(self.table.item(row, 0), QAbstractItemView.PositionAtCenter)
 
     def _update_cps(self) -> None:
         if self.current is None or not self.project:
@@ -426,7 +459,9 @@ class ReviewPage(QWidget):
         value = cps(self.project.episode.cue(self.current), self.editor.toPlainText())
         warn = value > CPS_LIMIT
         self.cps_label.setText(f"ความเร็วอ่าน {value:.0f} ตัวอักษร/วินาที" + (" · ยาวไป" if warn else ""))
-        self.cps_label.setStyleSheet(f"color: {COLORS['warn'] if warn else COLORS['good']};")
+        if self.cps_label.property("warn") != warn:   # restyle only when the state flips, not per keystroke
+            self.cps_label.setProperty("warn", warn)
+            self.cps_label.setStyleSheet(f"color: {COLORS['warn'] if warn else COLORS['good']};")
 
     def save_edit(self) -> None:
         if self.current is None or not self.project:
@@ -441,7 +476,7 @@ class ReviewPage(QWidget):
         self.timeline.update()
         self._update_counts()
         current = self.current
-        self._fill_table()
+        self._refresh_row(current)
         self.select(current)
 
     def shutdown(self, timeout_ms: int = 5000) -> bool:
