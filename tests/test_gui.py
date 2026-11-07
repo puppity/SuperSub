@@ -153,10 +153,13 @@ def test_describe_source_rules(tmp_path):
     assert describe_source(v, [T(0, "ass", "jpn")], [], ["ja", "en"])[0].sub_index == 0
     src, cands, meta = describe_source(v, [T(0, "hdmv_pgs_subtitle", "jpn")], [side], ["ja", "en"])
     assert src == side and "ไฟล์ซับข้างวิดีโอ" in meta
+    from subtitle_translator.core.transcribe import TRANSCRIBE
     src, cands, meta = describe_source(v, [], [], ["ja", "en"])
-    assert src is None and "ต้องถอดเสียง" in meta
+    assert src is TRANSCRIBE and "ถอดเสียง" in meta
     src, cands, meta = describe_source(v, [T(0, "hdmv_pgs_subtitle", "jpn")], [], ["ja", "en"])
-    assert src is None and "ซับภาพ" in meta
+    assert src is TRANSCRIBE and "ซับเป็นภาพ" in meta
+    src, cands, meta = describe_source(v, [], [], ["ja", "en"], auto_transcribe=False)
+    assert src is None and "ตั้งค่า" in meta
     src, cands, meta = describe_source(v, [T(0, "ass", "jpn"), T(1, "subrip", "jpn")], [], ["ja", "en"])
     assert src is None and len(cands) == 2
 

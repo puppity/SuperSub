@@ -27,6 +27,9 @@ class Settings:
     ass_font: str = "Leelawadee UI"
     ass_size: int = 52
     srt_colors: bool = False
+    auto_transcribe: bool = True            # no subtitle at all: make one from the audio
+    whisper_model: str = "large-v3-turbo"
+    mux_mkv: bool = False                   # also write <video>.th.mkv with the Thai track
 
 
 def default_settings_path() -> Path:

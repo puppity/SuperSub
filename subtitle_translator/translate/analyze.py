@@ -5,14 +5,14 @@ from pathlib import Path
 from ..ai.backend import AIBackend, AIRequest, AIResult
 from ..core.models import Character, Episode
 from ..core.series import SeriesMemory
-from .prompts import ANALYZE_SCHEMA, LANG_NAMES, SYSTEM_ANALYZE, format_cues
+from .prompts import ANALYZE_SCHEMA, SYSTEM_ANALYZE, format_cues, source_header
 
 PALETTE = ["#FBBF24", "#F472B6", "#2DD4BF", "#60A5FA", "#A78BFA", "#FB923C", "#4ADE80", "#F87171"]
 UNKNOWN_COLOR = "#A8A29E"
 
 
 def build_analyze_request(ep: Episode, effort: str, memory: str = "") -> AIRequest:
-    context = (f"Source language: {LANG_NAMES.get(ep.src_lang, ep.src_lang)}\n"
+    context = (source_header(ep)
                + (memory + "\n\n" if memory else "")
                + "Columns: id, start time, duration, Name/Actor/style tag, text\n\n"
                "SUBTITLES:\n" + format_cues(ep.cues))

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from ..ai.backend import AIError, AIErrorKind
 from ..ai.factory import make_backend
 from ..core.media import MediaError, SubTrack, lang_of, list_sub_tracks, pick_track, sidecar_subs
+from ..core.transcribe import TRANSCRIBE, Transcribe, TranscribeError
 from ..core.models import Project, untranslated_ids
 from ..core.pricing import MODELS
 from ..core.project_store import ProjectFileError
@@ -36,7 +37,7 @@ STOP_QUEUE = {AIErrorKind.AUTH, AIErrorKind.QUOTA, AIErrorKind.RATE_LIMIT,
 @dataclass
 class QueueItem:
     video: Path
-    source: SubTrack | Path | None = None
+    source: SubTrack | Path | Transcribe | None = None
     meta: str = ""
     status: str = "รอคิว"
     project: Project | None = None
@@ -44,8 +45,9 @@ class QueueItem:
     error: str | None = None
 
 
-def describe_source(video: Path, tracks: list[SubTrack], sidecars: list[Path], prefer: list[str]
-                    ) -> tuple[SubTrack | Path | None, list[SubTrack], str]:
+def describe_source(video: Path, tracks: list[SubTrack], sidecars: list[Path], prefer: list[str],
+                    auto_transcribe: bool = True
+                    ) -> tuple[SubTrack | Path | Transcribe | None, list[SubTrack], str]:
     chosen, cands = pick_track(tracks, tuple(prefer))
     if chosen is not None:
         name = {"ja": "ญี่ปุ่น", "en": "อังกฤษ"}.get(lang_of(chosen) or "", chosen.language)
@@ -54,9 +56,12 @@ def describe_source(video: Path, tracks: list[SubTrack], sidecars: list[Path], p
         return sidecars[0], [], f"ไฟล์ซับข้างวิดีโอ · {sidecars[0].name}"
     if cands:
         return None, cands, f"มีแทร็กซับ {len(cands)} แทร็ก · เลือกแทร็ก"
+    if not auto_transcribe:
+        return None, [], ("ซับภาพ (PGS/VobSub) · เปิด “ถอดเสียง” ในตั้งค่าเพื่อทำต่อ" if tracks
+                          else "ไม่พบซับ · เปิด “ถอดเสียง” ในตั้งค่าเพื่อทำต่อ")
     if tracks:
-        return None, [], "ซับภาพ (PGS/VobSub) · รองรับในเฟส 3"
-    return None, [], "ไม่พบซับ · ต้องถอดเสียง (เฟส 2)"
+        return TRANSCRIBE, [], "ซับเป็นภาพ อ่านไม่ได้ · จะถอดเสียงแทน"
+    return TRANSCRIBE, [], "ไม่พบซับ · จะถอดเสียงจากวิดีโอ"
 
 
 def friendly(exc: Exception) -> str:
@@ -87,7 +92,9 @@ class QueueRunner(QThread):
                 return
             try:
                 backend = make_backend(self.settings)
-                project = prepare_project(item.video, item.source, self.settings, cache_dir())
+                report = lambda stage, f, r=row: self.item_progress.emit(r, stage, f)
+                project = prepare_project(item.video, item.source, self.settings, cache_dir(),
+                                          report, lambda: self._stop)
                 project = run_project(project, backend, self.settings,
                                       lambda stage, f, r=row: self.item_progress.emit(r, stage, f),
                                       lambda: self._stop)
@@ -157,8 +164,11 @@ class EstimateRunner(QThread):
             if self._stop:
                 return
             try:
-                project = prepare_project(item.video, item.source, self.settings, cache_dir())
+                project = prepare_project(item.video, item.source, self.settings, cache_dir(),
+                                          allow_transcribe=False)
                 self.estimated.emit(row, estimate_project_cost(project, backend))
+            except TranscribeError:             # cost is known only after the audio is transcribed
+                self.estimated.emit(row, None)
             except Exception:
                 log.exception("estimate failed for %s", item.video)
                 self.estimated.emit(row, None)
@@ -449,7 +459,8 @@ class QueuePage(QWidget):
             if tracks is None:
                 self._append(QueueItem(video=v, status="ผิดพลาด", error=error))
                 return
-            source, cands, meta = describe_source(v, tracks, sidecar_subs(v), self.s.prefer_langs)
+            source, cands, meta = describe_source(v, tracks, sidecar_subs(v), self.s.prefer_langs,
+                                                  self.s.auto_transcribe)
             item = QueueItem(video=v, source=source, meta=meta,
                              status="รอคิว" if source is not None else "ข้าม")
             self._append(item, cands)

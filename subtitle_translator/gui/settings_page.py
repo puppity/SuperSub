@@ -10,6 +10,7 @@ from ..ai.api_backend import ApiBackend
 from ..ai.claude_code_backend import ClaudeCodeBackend, find_claude
 from ..core.pricing import MODELS
 from ..core.settings import Settings, get_api_key, set_api_key
+from ..core.transcribe import MODELS as WHISPER_MODELS
 from .theme import COLORS
 from .worker import CallWorker
 
@@ -137,6 +138,25 @@ class SettingsPage(QWidget):
         models_lay.addLayout(form)
         col.addWidget(models)
 
+        # --- speech to text ---
+        col.addWidget(label("ถอดเสียง (วิดีโอที่ไม่มีซับ)", "h2"))
+        asr, asr_lay = card()
+        self.auto_asr = QCheckBox("ถอดเสียงอัตโนมัติเมื่อวิดีโอไม่มีซับที่อ่านได้", checked=self.s.auto_transcribe)
+        self.auto_asr.toggled.connect(lambda on: self._set("auto_transcribe", on))
+        asr_lay.addWidget(self.auto_asr)
+        aform = QFormLayout()
+        self.whisper_box = QComboBox()
+        for key, desc in WHISPER_MODELS.items():
+            self.whisper_box.addItem(f"{key} — {desc}", key)
+        self.whisper_box.setCurrentIndex(max(0, self.whisper_box.findData(self.s.whisper_model)))
+        self.whisper_box.currentIndexChanged.connect(
+            lambda i: self._set("whisper_model", self.whisper_box.itemData(i)))
+        aform.addRow("โมเดลถอดเสียง", self.whisper_box)
+        asr_lay.addLayout(aform)
+        asr_lay.addWidget(label("ทำในเครื่อง ไม่เสียเงิน · ใช้การ์ดจอ NVIDIA ถ้ามี · "
+                                "ครั้งแรกจะดาวน์โหลดโมเดล (~1.6–3GB)", "hint"))
+        col.addWidget(asr)
+
         # --- output ---
         col.addWidget(label("ไฟล์ที่ส่งออก", "h2"))
         out, out_lay = card()
@@ -163,6 +183,10 @@ class SettingsPage(QWidget):
         self.srt_colors = QCheckBox("ใส่แท็กสีใน .srt ด้วย (บางโปรแกรมไม่แสดงสี)", checked=self.s.srt_colors)
         self.srt_colors.toggled.connect(lambda on: self._set("srt_colors", on))
         out_lay.addWidget(self.srt_colors)
+        self.mux_mkv = QCheckBox("แนบซับไทยเข้าไฟล์วิดีโอด้วย (สร้างไฟล์ใหม่ .th.mkv · ไม่แตะไฟล์เดิม)",
+                                 checked=self.s.mux_mkv)
+        self.mux_mkv.toggled.connect(lambda on: self._set("mux_mkv", on))
+        out_lay.addWidget(self.mux_mkv)
         col.addWidget(out)
         col.addStretch(1)
 

@@ -19,7 +19,7 @@ from ..core.media import MediaError, grab_frame
 from ..core.models import Cue, Project, untranslated_ids
 from ..core.project_store import save_project
 from ..core.settings import Settings, cache_dir
-from ..export import export_project
+from ..export import export_project, mux_mkv, mux_path
 from ..translate.analyze import UNKNOWN_COLOR
 from ..translate.translate import make_chunks, translate_chunk
 from .theme import COLORS
@@ -261,6 +261,7 @@ class VideoPreview(QGraphicsView):
 
 class ReviewPage(QWidget):
     COLS = ["#", "เวลา", "คนพูด → พูดกับ", "ต้นฉบับ", "ไทย"]
+    EXPORT_TEXT = "ส่งออก .srt + .ass"
 
     def __init__(self, settings: Settings, persist, parent=None):
         super().__init__(parent)
@@ -269,6 +270,7 @@ class ReviewPage(QWidget):
         self.current: int | None = None
         self.mode = "all"
         self._worker: CallWorker | None = None
+        self._mux_worker: CallWorker | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
@@ -302,7 +304,7 @@ class ReviewPage(QWidget):
         self.retry_failed_btn = QPushButton(RETRY_ALL_TEXT)
         self.retry_failed_btn.clicked.connect(self.retranslate_failed)
         head.addWidget(self.retry_failed_btn)
-        export = QPushButton("ส่งออก .srt + .ass")
+        self.export_btn = export = QPushButton(self.EXPORT_TEXT)
         export.setProperty("accent", True)
         export.clicked.connect(self.export)
         head.addWidget(export)
@@ -614,9 +616,10 @@ class ReviewPage(QWidget):
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         """Join background threads. True when nothing is left running."""
         ok = self.preview.shutdown(timeout_ms)
-        if self._worker is not None:
-            self._worker.wait(timeout_ms)
-            ok = ok and not self._worker.isRunning()
+        for w in (self._worker, self._mux_worker):
+            if w is not None:
+                w.wait(timeout_ms)
+                ok = ok and not w.isRunning()
         return ok
 
     def _set_translating(self, busy: bool) -> None:
@@ -727,4 +730,27 @@ class ReviewPage(QWidget):
             log.warning("export failed: %s", exc)
             QMessageBox.warning(self, "ส่งออกไม่สำเร็จ", str(exc))
             return
-        QMessageBox.information(self, "ส่งออกแล้ว", f"{srt}\n{ass}")
+        if not self.s.mux_mkv:
+            QMessageBox.information(self, "ส่งออกแล้ว", f"{srt}\n{ass}")
+            return
+        video = self.project.episode.video_path
+        out = mux_path(video, self.s.output_dir)
+        if out.exists() and QMessageBox.question(self, "มีไฟล์อยู่แล้ว", f"เขียนทับ {out}?") != QMessageBox.Yes:
+            QMessageBox.information(self, "ส่งออกแล้ว", f"{srt}\n{ass}")
+            return
+        self.export_btn.setEnabled(False)
+        self.export_btn.setText("กำลังแนบซับเข้าวิดีโอ…")
+
+        def finish(result=None, error=None):
+            self._mux_worker = None
+            self.export_btn.setEnabled(True)
+            self.export_btn.setText(self.EXPORT_TEXT)
+            if error is not None:
+                QMessageBox.warning(self, "แนบซับไม่สำเร็จ", f"{srt}\n{ass}\nส่งออกแล้ว แต่แนบเข้าวิดีโอไม่ได้:\n{error}")
+            else:
+                QMessageBox.information(self, "ส่งออกแล้ว", f"{srt}\n{ass}\n{result}")
+
+        self._mux_worker = CallWorker(lambda: mux_mkv(video, ass, out))
+        self._mux_worker.done.connect(lambda r: finish(result=r))
+        self._mux_worker.failed.connect(lambda e: finish(error=e))
+        self._mux_worker.start()

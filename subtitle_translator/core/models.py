@@ -48,6 +48,7 @@ class Episode:
     summary: str = ""
     glossary: dict[str, str] = field(default_factory=dict)    # source term -> Thai, kept across episodes
     series_notes: str = ""            # the user's notes from the series memory file
+    transcribed: bool = False         # source text came from speech recognition, not a subtitle file
 
     def cue(self, cue_id: int) -> Cue:
         for c in self.cues:
@@ -91,6 +92,7 @@ class Project:
             summary=e.get("summary", ""),
             glossary=dict(e.get("glossary", {})),
             series_notes=e.get("series_notes", ""),
+            transcribed=bool(e.get("transcribed", False)),
         )
         return cls(
             episode=episode,

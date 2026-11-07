@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..ai.backend import AIBackend, AIError, AIErrorKind, AIRequest
 from ..core.models import Cue, Episode
 from .prompts import (
-    LANG_NAMES, SYSTEM_TRANSLATE, TRANSLATE_MARKER, TRANSLATE_SCHEMA, format_cues, format_sheet,
+    SYSTEM_TRANSLATE, source_header, TRANSLATE_MARKER, TRANSLATE_SCHEMA, format_cues, format_sheet,
 )
 
 MIN_CHUNK = 10
@@ -22,7 +22,7 @@ def _names(ep: Episode) -> dict[str, str]:
 
 def build_translate_request(ep: Episode, ids: list[int], effort: str) -> AIRequest:
     names = _names(ep)
-    context = (f"Source language: {LANG_NAMES.get(ep.src_lang, ep.src_lang)}\n"
+    context = (source_header(ep)
                + format_sheet(ep)
                + "\n\nFULL SOURCE SUBTITLES (id, time, duration, speaker→listener, text):\n"
                + format_cues(ep.cues, names))

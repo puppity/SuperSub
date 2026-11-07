@@ -5,7 +5,16 @@ import json
 from ..core.models import Cue, Episode
 
 LANG_NAMES = {"ja": "Japanese", "en": "English"}
+ASR_NOTE = ("NOTE: these lines come from automatic speech recognition, not a subtitle file. "
+            "There are no speaker names: infer speakers from content and turn-taking. "
+            "Some words may be misheard; when a line is clearly a mishearing, use the meaning "
+            "the context makes obvious.\n")
 TRANSLATE_MARKER = "TRANSLATE THESE LINES:"
+
+
+def source_header(ep) -> str:
+    return (f"Source language: {LANG_NAMES.get(ep.src_lang, ep.src_lang)}\n"
+            + (ASR_NOTE if getattr(ep, "transcribed", False) else ""))
 
 SYSTEM_ANALYZE = """You analyze subtitles of one episode of a film, drama or anime before it is translated into Thai.
 Read every line. Work out:

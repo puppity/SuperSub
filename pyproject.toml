@@ -9,6 +9,10 @@ dependencies = [
   "jsonschema>=4.22",
   "keyring>=25",
   "platformdirs>=4.2",
+  "faster-whisper>=1.2",
+  "numpy>=1.26",
+  "nvidia-cublas-cu12; sys_platform == 'win32'",
+  "nvidia-cudnn-cu12>=9,<10; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

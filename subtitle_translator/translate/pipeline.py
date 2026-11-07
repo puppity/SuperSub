@@ -11,6 +11,7 @@ from ..core.project_store import load_project, save_project
 from ..core.settings import Settings
 from ..core.subio import guess_lang, load_cues
 from ..core.series import load_memory, save_memory
+from ..core.transcribe import Transcribe, TranscribeError, transcribe
 from .analyze import analyze, build_analyze_request
 from .translate import build_translate_request, make_chunks, translate_chunk
 
@@ -22,11 +23,21 @@ class Stopped(Exception):
     pass
 
 
-def prepare_project(video: str | Path, source: SubTrack | Path, settings: Settings, cache: Path) -> Project:
+def prepare_project(video: str | Path, source: SubTrack | Path | Transcribe, settings: Settings, cache: Path,
+                    progress: Callable[[str, float], None] = lambda s, f: None,
+                    should_stop: Callable[[], bool] = lambda: False,
+                    allow_transcribe: bool = True) -> Project:
     existing = load_project(video)
     if existing is not None:
         return existing
-    if isinstance(source, SubTrack):
+    transcribed = isinstance(source, Transcribe)
+    if transcribed:
+        if not allow_transcribe:
+            raise TranscribeError("ยังไม่ได้ถอดเสียง")
+        sub_path, lang = transcribe(video, cache, settings.whisper_model, progress, should_stop,
+                                    settings.prefer_langs)
+        cues, _ = load_cues(sub_path)
+    elif isinstance(source, SubTrack):
         sub_path = extract_sub(video, source, cache)
         cues, _ = load_cues(sub_path)
         lang = lang_of(source) or guess_lang(cues)
@@ -34,7 +45,8 @@ def prepare_project(video: str | Path, source: SubTrack | Path, settings: Settin
         sub_path = Path(source)
         cues, _ = load_cues(sub_path)
         lang = guess_lang(cues)
-    ep = Episode(video_path=str(video), source=str(sub_path), src_lang=lang, cues=cues)
+    ep = Episode(video_path=str(video), source=str(sub_path), src_lang=lang, cues=cues,
+                 transcribed=transcribed)
     project = Project(episode=ep, backend=settings.backend, model=settings.model,
                       chunk_size=settings.chunk_size)
     save_project(project)
