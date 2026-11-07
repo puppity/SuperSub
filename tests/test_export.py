@@ -1,3 +1,4 @@
+from pathlib import Path
 import pysubs2
 import pytest
 
@@ -62,7 +63,10 @@ def test_export_project_paths_and_overwrite(tmp_path):
     with pytest.raises(FileExistsError):
         export_project(p, Settings())
     export_project(p, Settings(), overwrite=True)
-    assert output_paths(ep.video_path, str(tmp_path / "out"))[0] == tmp_path / "out" / "EP01.th.srt"
+    series = tmp_path.name                    # "EP01.mkv" has no title: its folder names the series
+    assert srt.parent == tmp_path              # already in a folder named after the series: no nesting
+    assert output_paths(ep.video_path, str(tmp_path / "out"))[0] == tmp_path / "out" / series / "EP01.th.srt"
+    assert output_paths("D:/x/Show - 01.mkv", "E:/out")[0] == Path("E:/out/Show/Show - 01.th.srt")
 
 
 ORIG = """[Script Info]

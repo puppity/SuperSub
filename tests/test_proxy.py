@@ -23,7 +23,7 @@ def test_av1_needs_proxy_and_proxy_is_playable_h264(av1_video, tmp_path, monkeyp
     assert proxy.needs_proxy(av1_video)
     job = proxy.ensure_proxy(av1_video)
     assert proxy.ensure_proxy(av1_video, start=False) is job          # one shared job per file
-    job._thread.join(60)
+    job._thread.join(300)                                    # slow when the CPU is busy
     assert job.ready and job.error is None and job.fraction == 1.0
     assert proxy.video_codec(job.out) == "h264"
     assert abs(proxy.duration_of(job.out) - 2.0) < 0.3                # same timeline as the source

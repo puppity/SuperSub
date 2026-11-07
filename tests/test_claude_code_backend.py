@@ -127,3 +127,36 @@ def test_workdir_is_shared_between_instances():
     a = ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=Runner())
     b = ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=Runner())
     assert a.workdir == b.workdir
+
+
+def stream_proc(result, is_error=False):
+    lines = [json.dumps({"type": "system", "subtype": "init"}),
+             json.dumps({"type": "assistant", "message": {"content": []}}),
+             json.dumps({"type": "result", "is_error": is_error, "result": result})]
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout="\n".join(lines).encode("utf-8"),
+                                       stderr=b"")
+
+
+def test_pictures_go_through_stream_json_with_tools_still_off():
+    req = AIRequest(system="SYS", context="CTX", task="TASK", schema=SCHEMA,
+                    images=[("FRAME line 3", b"\xff\xd8jpeg")])
+    runner = Runner(stream_proc('{"ok": true}'))
+    res = ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=runner).run_json(req)
+    assert res.data == {"ok": True}
+    args, kw = runner.calls[0]
+    assert args[2:7] == ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+    assert args[-7:] == ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                         "--no-session-persistence", "--permission-prompts", "none"]
+    msg = json.loads(kw["input"].decode("utf-8"))
+    content = msg["message"]["content"]
+    assert msg["type"] == "user" and [b["type"] for b in content] == ["text", "text", "image", "text"]
+    assert content[0]["text"].startswith("SYS") and content[1]["text"] == "FRAME line 3"
+    assert content[2]["source"]["media_type"] == "image/jpeg" and content[3]["text"].startswith("TASK")
+
+
+def test_stream_json_error_result_is_mapped():
+    req = AIRequest(system="S", context="C", task="T", schema=SCHEMA, images=[("x", b"1")])
+    runner = Runner(stream_proc("You've hit your usage limit · resets 5pm", is_error=True))
+    with pytest.raises(Exception) as e:
+        ClaudeCodeBackend("claude-opus-5-5", exe="claude", runner=runner).run_json(req)
+    assert e.value.kind is AIErrorKind.QUOTA

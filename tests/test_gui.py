@@ -694,7 +694,11 @@ def test_preview_falls_back_to_stills_when_no_frame_decodes(qtbot, tmp_path, mon
     pv.set_source(str(tmp_path / "EP01.mkv"))          # _load_media is stubbed: no frame will ever arrive
     pv._watchdog.setInterval(50)
     pv.show_cue(ep.cues[0], "ไทย", "#fff")
-    qtbot.waitUntil(lambda: pv.fallback and len(grabs) > 0, timeout=3000)
+    qtbot.waitUntil(lambda: len(grabs) > 0, timeout=3000)   # paused: our own still is shown at once
+    qtbot.wait(150)
+    assert not pv.fallback                                 # a paused player never decodes: no verdict yet
+    pv._on_playing(True)                                   # playing, yet no frame arrives
+    qtbot.waitUntil(lambda: pv.fallback, timeout=3000)
     assert seen == [True]
     assert grabs[0] == (ep.cues[0].start + ep.cues[0].end) / 2
     pv.toggle()                                         # play is a no-op on stills
@@ -748,3 +752,58 @@ def test_av1_preview_shows_stills_then_switches_to_playable_copy(qtbot, tmp_path
     job.ready = True
     pv._poll_proxy()
     assert not pv.fallback and loaded == [str(out)]
+
+
+def test_playing_video_drives_caption_row_and_time(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    monkeypatch.setattr(rp, "needs_proxy", lambda p: False)
+    p = review_project(tmp_path)
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.load(p)
+    page.select(1)
+    page.preview._on_media_status = lambda *a: None
+    page._on_duration(1500.0)
+    assert page.seek_bar.maximum() == 1500000 and page.time_label.text() == "00:00 / 25:00"
+    monkeypatch.setattr(rp.VideoPreview, "playing", property(lambda self: True))
+    c3 = p.episode.cue(3)
+    page._on_position((c3.start + c3.end) / 2)               # the video reached line 3
+    assert page.current == 3 and page.preview._caption == "ไทย 3"
+    assert page.table.selectedItems()[0].data(rp.Qt.UserRole) == 3
+    assert page.cue_at(c3.end + 1000) is None
+    page.editor.setFocus()
+    monkeypatch.setattr(page.editor, "hasFocus", lambda: True)
+    c4 = p.episode.cue(4)
+    page._on_position(c4.start + 0.01)                      # caption follows, typing is kept
+    assert page.preview._caption == "ไทย 4" and page.current == 3
+    monkeypatch.setattr(rp.VideoPreview, "playing", property(lambda self: False))
+    page._on_position(p.episode.cue(1).start + 0.01)        # paused: no auto-follow
+    assert page.current == 3
+    assert page.play_btn.isEnabled() and page.stop_btn.isEnabled()
+
+
+def test_queue_mode_toggle_persists_picture_mode(qtbot, tmp_path, no_real_ai):
+    from subtitle_translator.gui.queue_page import QueuePage
+    s = Settings()
+    saved = []
+    page = QueuePage(s, lambda: saved.append(s.vision_mode))
+    qtbot.addWidget(page)
+    assert page.mode_box.currentIndex() == 0 and not s.vision_mode
+    page.mode_box.setCurrentIndex(1)
+    assert s.vision_mode and saved[-1] is True
+
+
+def test_playable_copy_is_never_dropped_to_stills(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    from types import SimpleNamespace
+    out = tmp_path / "proxy.mp4"
+    out.write_bytes(b"x")
+    job = SimpleNamespace(out=out, ready=True)
+    monkeypatch.setattr(rp, "needs_proxy", lambda p: True)
+    monkeypatch.setattr(rp, "ensure_proxy", lambda p: job)
+    pv = rp.VideoPreview()
+    qtbot.addWidget(pv)
+    pv.set_source(str(tmp_path / "EP01.mkv"))
+    pv._check_decoding()                     # slow first frame on a busy machine
+    assert not pv.fallback

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from ..core.models import Project
+from ..core.series import series_dir
 from ..core.settings import Settings
 from .ass_writer import write_ass
 from .srt_writer import write_srt
@@ -11,7 +12,7 @@ from .srt_writer import write_srt
 
 def output_paths(video: str | Path, out_dir: str | None) -> tuple[Path, Path]:
     v = Path(video)
-    folder = Path(out_dir) if out_dir else v.parent
+    folder = series_dir(v, out_dir)
     return folder / f"{v.stem}.th.srt", folder / f"{v.stem}.th.ass"
 
 
@@ -29,6 +30,7 @@ def export_project(project: Project, settings: Settings, overwrite: bool = False
         for p in (srt, ass):
             if p.exists():
                 raise FileExistsError(str(p))
+    srt.parent.mkdir(parents=True, exist_ok=True)
     colors = {ch.key: ch.color for ch in ep.characters} if settings.srt_colors else None
     write_srt(ep.cues, srt, colors)
     write_ass(ep, ass, settings.ass_font, settings.ass_size)
@@ -37,7 +39,7 @@ def export_project(project: Project, settings: Settings, overwrite: bool = False
 
 def mux_path(video: str | Path, out_dir: str | None) -> Path:
     v = Path(video)
-    return (Path(out_dir) if out_dir else v.parent) / f"{v.stem}.th.mkv"
+    return series_dir(v, out_dir) / f"{v.stem}.th.mkv"
 
 
 def mux_mkv(video: str | Path, ass: str | Path, out: str | Path) -> Path:
@@ -50,6 +52,7 @@ def mux_mkv(video: str | Path, ass: str | Path, out: str | Path) -> Path:
     out = Path(out)
     if _same_file(out, video):
         raise ValueError(f"ปลายทางตรงกับไฟล์วิดีโอต้นฉบับ จะไม่เขียนทับ: {out}")
+    out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.stem + ".part.mkv")
     th = len(list_sub_tracks(video))          # the Thai track comes after the existing subtitles
     res = _run([tool_path("ffmpeg"), "-y", "-v", "error", "-i", str(video), "-i", str(ass),

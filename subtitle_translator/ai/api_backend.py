@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 import json
 import logging
 from contextlib import contextmanager
@@ -51,6 +53,18 @@ def sdk_errors():
         raise mapped from exc
 
 
+def user_content(req: AIRequest):
+    if not req.images:
+        return req.task
+    blocks = []
+    for label, data in req.images:
+        blocks.append({"type": "text", "text": label})
+        blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                   "data": base64.b64encode(data).decode("ascii")}})
+    blocks.append({"type": "text", "text": req.task})
+    return blocks
+
+
 def build_params(model: str, req: AIRequest) -> dict:
     return {
         "model": model,
@@ -59,7 +73,7 @@ def build_params(model: str, req: AIRequest) -> dict:
             {"type": "text", "text": req.system},
             {"type": "text", "text": req.context, "cache_control": {"type": "ephemeral"}},
         ],
-        "messages": [{"role": "user", "content": req.task}],
+        "messages": [{"role": "user", "content": user_content(req)}],
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": req.effort,
                           "format": {"type": "json_schema", "schema": req.schema}},

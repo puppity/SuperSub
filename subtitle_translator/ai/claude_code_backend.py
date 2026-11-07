@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import atexit
+import base64
 import subprocess
 import tempfile
 from pathlib import Path
@@ -40,6 +41,22 @@ SAFETY_FLAGS = ["--tools", "", "--strict-mcp-config", "--disable-slash-commands"
                 "--no-session-persistence", "--permission-prompts", "none"]
 
 
+def _last_result(stream_out: str) -> dict | None:
+    """The final {"type": "result"} event of a stream-json transcript."""
+    found = None
+    for line in stream_out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            found = event
+    return found
+
+
 def find_claude() -> str | None:
     found = shutil.which("claude")
     if found:
@@ -64,18 +81,43 @@ class ClaudeCodeBackend:
         return _shared_workdir()
 
     def _prompt(self, req: AIRequest, error_note: str | None = None) -> str:
-        parts = [req.system, req.context, req.task,
-                 "Reply with ONLY one JSON value that matches this JSON Schema. "
-                 "No prose, no code fences, do not use any tools.\n" + json.dumps(req.schema, ensure_ascii=False)]
-        if error_note:
-            parts.append(error_note)
-        return "\n\n".join(parts)
+        return "\n\n".join(self._parts(req, error_note))
 
-    def _call(self, prompt: str, effort: str | None = None) -> str:
+    @staticmethod
+    def _parts(req: AIRequest, error_note: str | None = None) -> tuple[str, str]:
+        """(system + context, task + schema): pictures go between the two."""
+        tail = [req.task, "Reply with ONLY one JSON value that matches this JSON Schema. "
+                "No prose, no code fences, do not use any tools.\n" + json.dumps(req.schema, ensure_ascii=False)]
+        if error_note:
+            tail.append(error_note)
+        return "\n\n".join([req.system, req.context]), "\n\n".join(tail)
+
+    @staticmethod
+    def _image_message(req: AIRequest, error_note: str | None = None) -> str:
+        """One stream-json user message carrying text and pictures (the CLI's stdin format)."""
+        head, tail = ClaudeCodeBackend._parts(req, error_note)
+        content: list[dict] = [{"type": "text", "text": head}]
+        for label, data in req.images:
+            content.append({"type": "text", "text": label})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                        "data": base64.b64encode(data).decode("ascii")}})
+        content.append({"type": "text", "text": tail})
+        return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
+
+    def _request(self, req: AIRequest, error_note: str | None = None) -> str:
+        if req.images:
+            return self._call(self._image_message(req, error_note), req.effort, stream=True)
+        return self._call(self._prompt(req, error_note), req.effort)
+
+    def _call(self, prompt: str, effort: str | None = None, stream: bool = False) -> str:
         exe = self.exe or find_claude()
         if not exe:
             raise AIError(AIErrorKind.NOT_INSTALLED, "ไม่พบ Claude Code — ติดตั้งแล้วล็อกอินด้วยบัญชี Max ก่อน")
-        args = [exe, "-p", "--output-format", "json", "--model", MODEL_ALIAS.get(self.model, "opus")]
+        args = [exe, "-p"]
+        # Pictures need the stream-json stdin format, which needs stream-json output too.
+        args += (["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+                 if stream else ["--output-format", "json"])
+        args += ["--model", MODEL_ALIAS.get(self.model, "opus")]
         if effort:
             # Without this the CLI uses the user's own default (often xhigh), which made
             # whole-episode analysis take many minutes.
@@ -90,10 +132,12 @@ class ClaudeCodeBackend:
             raise AIError(AIErrorKind.NETWORK, f"Claude Code ตอบช้าเกิน {CALL_TIMEOUT_S // 60} นาที") from exc
         out = r.stdout.decode("utf-8", "replace")
         err = r.stderr.decode("utf-8", "replace")
-        try:
-            outer = json.loads(out)
-        except json.JSONDecodeError:
-            outer = None
+        outer = _last_result(out) if stream else None
+        if not stream:
+            try:
+                outer = json.loads(out)
+            except json.JSONDecodeError:
+                outer = None
         result = outer.get("result", "") if isinstance(outer, dict) else out
         is_error = r.returncode != 0 or (isinstance(outer, dict) and bool(outer.get("is_error")))
         if is_error:
@@ -116,12 +160,12 @@ class ClaudeCodeBackend:
         return data
 
     def run_json(self, req: AIRequest) -> AIResult:
-        text = self._call(self._prompt(req), req.effort)
+        text = self._request(req)
         try:
             data = self._parse(text, req.schema)
         except (ValueError, AIError) as first:
             note = f"Your previous reply was invalid ({first}). Return only valid JSON for the schema."
-            text = self._call(self._prompt(req, note), req.effort)
+            text = self._request(req, note)
             try:
                 data = self._parse(text, req.schema)
             except ValueError as exc:

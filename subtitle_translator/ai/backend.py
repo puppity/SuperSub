@@ -48,6 +48,8 @@ class AIRequest:
     task: str
     schema: dict
     effort: str = "medium"
+    # (label, JPEG bytes): pictures sent with the task, each preceded by its label text.
+    images: list[tuple[str, bytes]] = field(default_factory=list)
 
 
 class AIBackend(Protocol):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import fields, asdict, dataclass, field
 from typing import Any
 
 
@@ -36,6 +36,16 @@ class Character:
     relations: list[str] = field(default_factory=list)
     address_terms: dict[str, str] = field(default_factory=dict)
     color: str = "#FFFFFF"
+    alignment: str = "unknown"        # hero | villain | neutral | unknown
+    self_pronoun: str = ""            # how the character says "I" in Thai: ผม, ฉัน, ข้า, กู ...
+    you_pronoun: str = ""             # how the character usually says "you": คุณ, นาย, เธอ, แก, เจ้า ...
+    speech_style: str = ""            # short Thai note on register, e.g. "สุภาพกับหัวหน้า ห้าวกับเพื่อน"
+    face: str = ""                    # file name of a reference face image in the series folder
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Character":
+        names = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in names})
 
 
 @dataclass
@@ -88,7 +98,7 @@ class Project:
             source=e["source"],
             src_lang=e["src_lang"],
             cues=[Cue(**c) for c in e["cues"]],
-            characters=[Character(**c) for c in e["characters"]],
+            characters=[Character.from_dict(c) for c in e["characters"]],
             summary=e.get("summary", ""),
             glossary=dict(e.get("glossary", {})),
             series_notes=e.get("series_notes", ""),

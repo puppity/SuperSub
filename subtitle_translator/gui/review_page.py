@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import logging
 import re
 from pathlib import Path
@@ -11,14 +12,15 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QColorDialog, QComboBox, QFrame, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsPathItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QSlider, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..ai.factory import make_backend
 from ..core.media import MediaError, grab_frame
-from ..core.proxy import ProxyJob, ensure_proxy, needs_proxy
+from ..core.proxy import ProxyJob, ensure_proxy, needs_proxy, video_codec
 from ..core.models import Cue, Project, untranslated_ids
 from ..core.project_store import save_project
+from ..core.series import ALIGN_TH
 from ..core.settings import Settings, cache_dir
 from ..export import export_project, mux_mkv, mux_path
 from ..translate.analyze import UNKNOWN_COLOR
@@ -28,6 +30,8 @@ from .timeline_widget import TimelineWidget
 from .worker import CallWorker
 
 log = logging.getLogger(__name__)
+# Qt's FFmpeg decodes these in software everywhere: a slow first frame is load, not failure.
+PLAYABLE_CODECS = {"h264", "hevc", "mpeg4", "vp8", "vp9", "mpeg2video"}
 UNSURE_THRESHOLD = 0.6
 CPS_LIMIT = 17
 RETRY_ALL_TEXT = "แปลบรรทัดที่ล้มเหลวใหม่ทั้งหมด"
@@ -82,6 +86,11 @@ class VideoPreview(QGraphicsView):
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
         self.player.errorOccurred.connect(self._on_error)
+        self.player.positionChanged.connect(lambda ms: self.position_changed.emit(ms / 1000))
+        self.player.durationChanged.connect(lambda ms: self.duration_changed.emit(ms / 1000))
+        self.player.playbackStateChanged.connect(
+            lambda st: self.playing_changed.emit(st == QMediaPlayer.PlayingState))
+        self.playing_changed.connect(self._on_playing)
         self.fallback = False
         self.path: str | None = None
         self._want: tuple[str, float] | None = None     # latest requested still (path, time)
@@ -95,11 +104,13 @@ class VideoPreview(QGraphicsView):
         # hardware decoder) and it raises no error. If no frame shows up soon after a
         # seek, switch to still frames grabbed by our bundled ffmpeg instead.
         self._got_frame = False
+        self._trusted = False
+        self._media_path: str | None = None
         self.video.videoSink().videoFrameChanged.connect(self._on_video_frame)
         self.player.mediaStatusChanged.connect(self._on_media_status)
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
-        self._watchdog.setInterval(2500)
+        self._watchdog.setInterval(6000)       # a busy CPU can delay the first frame
         self._watchdog.timeout.connect(self._check_decoding)
         self._last_cue: Cue | None = None
         # AV1 and friends: show stills while a playable H.264 copy is built in the background.
@@ -109,13 +120,22 @@ class VideoPreview(QGraphicsView):
         self._proxy_timer.timeout.connect(self._poll_proxy)
 
     fallback_changed = Signal(bool)
-    status_changed = Signal(str)          # text for the play button while there is no playable video
+    status_changed = Signal(str)          # status text while there is no playable video
+    position_changed = Signal(float)      # seconds
+    duration_changed = Signal(float)      # seconds
+    playing_changed = Signal(bool)
+
+    @property
+    def playing(self) -> bool:
+        return self.player.playbackState() == QMediaPlayer.PlayingState
 
     def set_source(self, path: str) -> None:
         self.path = path
         self._set_fallback(False)
         self._want = None
         self._got_frame = False
+        self._trusted = False                  # our own H.264 copy: never give up on it
+        self._media_path = None
         self._last_cue = None
         self._proxy = None
         self._proxy_timer.stop()
@@ -123,7 +143,7 @@ class VideoPreview(QGraphicsView):
         if needs_proxy(path):
             job = ensure_proxy(path)
             if job.ready:
-                self._load_media(str(job.out))
+                self._load_proxy(str(job.out))
                 return
             self.player.setSource(QUrl())        # never hand Qt a file it cannot decode
             self._proxy = job
@@ -131,6 +151,10 @@ class VideoPreview(QGraphicsView):
             self._proxy_timer.start()
             self._poll_proxy()
             return
+        try:
+            self._trusted = video_codec(path) in PLAYABLE_CODECS
+        except Exception:
+            self._trusted = False
         self._load_media(path)
 
     def _poll_proxy(self) -> None:
@@ -143,10 +167,9 @@ class VideoPreview(QGraphicsView):
             self._proxy = None
             self._got_frame = False
             self._set_fallback(False)
-            self._load_media(str(job.out))
+            self._load_proxy(str(job.out))
             if self._last_cue is not None:
                 self.player.setPosition(int(self._last_cue.start * 1000))
-                self._watchdog.start()
             self._layout()
             return
         if job.error:
@@ -157,7 +180,12 @@ class VideoPreview(QGraphicsView):
             job.start()
         self.status_changed.emit(f"กำลังเตรียมวิดีโอสำหรับเล่น {int(job.fraction * 100)}% · ระหว่างนี้แสดงภาพนิ่ง")
 
+    def _load_proxy(self, path: str) -> None:
+        self._trusted = True
+        self._load_media(path)
+
     def _load_media(self, path: str) -> None:
+        self._media_path = path
         self.player.setSource(QUrl.fromLocalFile(path))
 
     def _set_fallback(self, on: bool) -> None:
@@ -165,6 +193,8 @@ class VideoPreview(QGraphicsView):
             return
         self.fallback = on
         self.video.setVisible(not on)
+        if on:
+            self.still.setVisible(True)
         self.fallback_changed.emit(on)
 
     def _go_still(self, reason: str) -> None:
@@ -183,14 +213,24 @@ class VideoPreview(QGraphicsView):
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.InvalidMedia:
             self._go_still("invalid media")
+        elif status == QMediaPlayer.LoadedMedia and self._last_cue is not None:
+            # A seek made while the file was still opening is dropped by Qt: redo it now.
+            self.player.setPosition(int(self._last_cue.start * 1000))
 
     def _on_video_frame(self, frame) -> None:
         if frame.isValid():
             self._got_frame = True
             self._watchdog.stop()
+            if self.playing and not self.fallback:
+                self.still.setVisible(False)     # the real video takes over from the still
+
+    def _on_playing(self, on: bool) -> None:
+        # Only a playing player must produce frames; a paused one never does after a seek.
+        if on and not self._got_frame and not self.fallback:
+            self._watchdog.start()
 
     def _check_decoding(self) -> None:
-        if not self._got_frame:
+        if not self._got_frame and not self._trusted:
             self._go_still("no decoded frame")
 
     def show_cue(self, cue: Cue, text: str, color: str) -> None:
@@ -201,10 +241,15 @@ class VideoPreview(QGraphicsView):
             self._want = (self.path, (cue.start + cue.end) / 2)
             self._debounce.start()
         else:
-            self.player.pause()
+            if not self.playing:
+                # Qt draws nothing after a seek while paused, so show our own still of the
+                # line until the video plays. While playing, jump there and keep playing.
+                self.player.pause()
+                if self.path:
+                    self.still.setVisible(True)
+                    self._want = (self.path, (cue.start + cue.end) / 2)
+                    self._debounce.start()
             self.player.setPosition(int(cue.start * 1000))
-            if not self._got_frame and self.path:
-                self._watchdog.start()
         self._layout()
 
     def _start_grab(self) -> None:
@@ -215,7 +260,8 @@ class VideoPreview(QGraphicsView):
         path, t = self._want
         self._started = self._want
         out = cache_dir() / "preview.png"
-        worker = CallWorker(lambda: grab_frame(path, t, out, width=960))
+        src = self._media_path or path          # the H.264 copy, when loaded, seeks much faster
+        worker = CallWorker(lambda: grab_frame(src, t, out, width=960))
         worker.done.connect(lambda png, k=(path, t): self._on_frame(k, png))
         worker.failed.connect(lambda exc, k=(path, t): self._on_frame(k, None))
         worker.finished.connect(self._on_grab_finished)
@@ -259,12 +305,29 @@ class VideoPreview(QGraphicsView):
         return True
 
     def toggle(self) -> None:
-        if self.fallback:
+        if self.fallback or self.player.source().isEmpty():
             return
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        if self.playing:
             self.player.pause()
         else:
             self.player.play()
+
+    def stop(self) -> None:
+        """Pause and go back to the start of the selected line."""
+        if self.fallback or self.player.source().isEmpty():
+            return
+        self.player.pause()
+        self.player.setPosition(int(self._last_cue.start * 1000) if self._last_cue else 0)
+
+    def seek(self, seconds: float) -> None:
+        if not self.fallback and not self.player.source().isEmpty():
+            self.player.setPosition(int(max(0.0, seconds) * 1000))
+
+    def set_caption(self, text: str, color: str) -> None:
+        """Change the overlay text only (used while the video plays on its own)."""
+        self._caption = text
+        self.text.setBrush(QBrush(QColor(color)))
+        self._layout()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -307,6 +370,8 @@ class VideoPreview(QGraphicsView):
 class ReviewPage(QWidget):
     COLS = ["#", "เวลา", "คนพูด → พูดกับ", "ต้นฉบับ", "ไทย"]
     EXPORT_TEXT = "ส่งออก .srt + .ass"
+    PLAY_TEXT = "▶  เล่น"
+    PAUSE_TEXT = "⏸  หยุด"
 
     def __init__(self, settings: Settings, persist, parent=None):
         super().__init__(parent)
@@ -369,11 +434,37 @@ class ReviewPage(QWidget):
         self.preview = VideoPreview()
         self.preview.setMinimumSize(240, 135)
         left.addWidget(self.preview, 1)
-        self.play_btn = play = QPushButton("เล่น / หยุด  (F5)")
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        self.play_btn = play = QPushButton(self.PLAY_TEXT)
+        play.setToolTip("เล่น / หยุดชั่วคราว (F5)")
         play.clicked.connect(self.preview.toggle)
+        controls.addWidget(play)
+        self.stop_btn = QPushButton("⏹")
+        self.stop_btn.setToolTip("หยุด แล้วกลับไปต้นบรรทัดที่เลือก")
+        self.stop_btn.clicked.connect(self.preview.stop)
+        controls.addWidget(self.stop_btn)
+        self.seek_bar = QSlider(Qt.Horizontal)
+        self.seek_bar.setRange(0, 0)
+        self.seek_bar.sliderMoved.connect(lambda ms: self.preview.seek(ms / 1000))
+        controls.addWidget(self.seek_bar, 1)
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setProperty("role", "muted")
+        controls.addWidget(self.time_label)
+        left.addLayout(controls)
+        self.preview_status = QLabel("")
+        self.preview_status.setProperty("role", "muted")
+        self.preview_status.setWordWrap(True)
+        self.preview_status.setVisible(False)
+        left.addWidget(self.preview_status)
+        self._duration = 0.0
+        self._timeline_index: list[tuple[float, float, int]] = []
+        self._starts: list[float] = []
         self.preview.fallback_changed.connect(self._on_preview_fallback)
-        self.preview.status_changed.connect(self.play_btn.setText)
-        left.addWidget(play)
+        self.preview.status_changed.connect(self._show_preview_status)
+        self.preview.playing_changed.connect(lambda on: play.setText(self.PAUSE_TEXT if on else self.PLAY_TEXT))
+        self.preview.duration_changed.connect(self._on_duration)
+        self.preview.position_changed.connect(self._on_position)
         self.left_split.addWidget(preview_box)
         chars_card = QFrame()
         chars_card.setProperty("card", True)
@@ -456,9 +547,56 @@ class ReviewPage(QWidget):
         QShortcut(QKeySequence("F5"), self, activated=self.preview.toggle)
 
     def _on_preview_fallback(self, still: bool) -> None:
-        self.play_btn.setEnabled(not still)
-        self.play_btn.setText("วิดีโอนี้เล่นในโปรแกรมไม่ได้ · แสดงภาพนิ่งของแต่ละบรรทัดแทน"
-                              if still else "เล่น / หยุด  (F5)")
+        for w in (self.play_btn, self.stop_btn, self.seek_bar):
+            w.setEnabled(not still)
+        self.play_btn.setText(self.PLAY_TEXT)
+        self._show_preview_status("วิดีโอนี้เล่นในโปรแกรมไม่ได้ · แสดงภาพนิ่งของแต่ละบรรทัดแทน" if still else "")
+
+    def _show_preview_status(self, text: str) -> None:
+        self.preview_status.setText(text)
+        self.preview_status.setVisible(bool(text))
+
+    def _on_duration(self, seconds: float) -> None:
+        self._duration = seconds
+        self.seek_bar.setRange(0, int(seconds * 1000))
+        self._update_time(self.seek_bar.value() / 1000)
+
+    def _update_time(self, t: float) -> None:
+        def mmss(x: float) -> str:
+            x = int(x)
+            h, rest = divmod(x, 3600)
+            return (f"{h}:" if h else "") + f"{rest // 60:02d}:{rest % 60:02d}"
+        self.time_label.setText(f"{mmss(t)} / {mmss(self._duration)}")
+
+    def cue_at(self, t: float) -> int | None:
+        """Id of the line shown at time t, or None between lines."""
+        i = bisect.bisect_right(self._starts, t)
+        for j in range(i - 1, max(-1, i - 6), -1):      # look back a few lines for overlaps
+            start, end, cid = self._timeline_index[j]
+            if start <= t < end:
+                return cid
+        return None
+
+    def _on_position(self, t: float) -> None:
+        if not self.seek_bar.isSliderDown():
+            self.seek_bar.blockSignals(True)
+            self.seek_bar.setValue(int(t * 1000))
+            self.seek_bar.blockSignals(False)
+        self._update_time(t)
+        if not self.project or not self.preview.playing:
+            return
+        # Follow the video: the caption and the highlighted row track what is on screen.
+        cid = self.cue_at(t)
+        if cid is None:
+            self.preview.set_caption("", UNKNOWN_COLOR)
+            return
+        if cid == self.current:
+            return
+        c = self.project.episode.cue(cid)
+        self.preview.set_caption(c.thai or c.src, self._colors().get(c.speaker, UNKNOWN_COLOR))
+        if self.editor.hasFocus():
+            return                     # never replace text the user is typing
+        self.select(cid, follow=True)
 
     # ----- data helpers -----
     def _colors(self) -> dict[str | None, str]:
@@ -487,6 +625,12 @@ class ReviewPage(QWidget):
         self.speaker_box.clear()
         for key, name in names.items():
             self.speaker_box.addItem(name, key)
+        self._timeline_index = sorted((c.start, c.end, c.id) for c in ep.cues if not c.skip)
+        self._starts = [x[0] for x in self._timeline_index]
+        self._duration = 0.0
+        self.seek_bar.setRange(0, 0)
+        self._update_time(0)
+        self.play_btn.setText(self.PLAY_TEXT)
         self.preview.set_source(ep.video_path)
         self.timeline.set_data(ep.cues, colors, names)
         self.filter_buttons["all"].setChecked(True)
@@ -501,7 +645,13 @@ class ReviewPage(QWidget):
         for key, name in names.items():
             count = sum(1 for c in ep.cues if c.speaker == key and not c.skip)
             ch = ep.character(key)
-            info = f"{ch.gender} · {ch.role}" if ch else "ยังระบุคนพูดไม่ได้"
+            if ch:
+                bits = [ch.gender, ch.role, ALIGN_TH.get(ch.alignment, "")]
+                if ch.self_pronoun or ch.you_pronoun:
+                    bits.append(f"{ch.self_pronoun or '-'}/{ch.you_pronoun or '-'}")
+                info = " · ".join(b for b in bits if b)
+            else:
+                info = "ยังระบุคนพูดไม่ได้"
             self.chars.addItem(f"● {name} — {info} · {count} บรรทัด")
             item = self.chars.item(self.chars.count() - 1)
             item.setForeground(QColor(colors[key]))
@@ -594,7 +744,8 @@ class ReviewPage(QWidget):
         if items:
             self.select(items[0].data(Qt.UserRole), from_table=True)
 
-    def select(self, cue_id: int, from_table: bool = False) -> None:
+    def select(self, cue_id: int, from_table: bool = False, follow: bool = False) -> None:
+        """Make a line current. follow=True: the playing video reached it, so do not seek."""
         if not self.project:
             return
         c = self.project.episode.cue(cue_id)
@@ -603,7 +754,12 @@ class ReviewPage(QWidget):
         self.editor.setPlainText(c.thai or "")
         idx = self.speaker_box.findData(c.speaker)
         self.speaker_box.setCurrentIndex(idx if idx >= 0 else self.speaker_box.count() - 1)
-        self.preview.show_cue(c, c.thai or c.src, self._colors().get(c.speaker, UNKNOWN_COLOR))
+        color = self._colors().get(c.speaker, UNKNOWN_COLOR)
+        if follow:
+            self.preview._last_cue = c
+            self.preview.set_caption(c.thai or c.src, color)
+        else:
+            self.preview.show_cue(c, c.thai or c.src, color)
         self.timeline.set_selected(cue_id)
         if not from_table:
             row = self._row_of.get(cue_id)

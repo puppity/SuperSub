@@ -24,6 +24,7 @@ NOTES_HINT = "(เขียนอะไรก็ได้ตรงนี้ เ�
 _DATA = re.compile(r"<!--\s*series-data\s*(\{.*\})\s*-->", re.S)
 _NOTES = re.compile(r"^## โน้ตของผู้ใช้[ \t]*\n(.*?)(?=^## |\Z|<!--\s*series-data)", re.S | re.M)
 MAX_SUMMARIES_IN_PROMPT = 4
+ALIGN_TH = {"hero": "ฝ่ายดี", "villain": "ฝ่ายร้าย", "neutral": "กลางๆ"}
 
 # Episode markers at the end of a file name: "- 01", "EP01", "E01", "S01E01", "第01話", "#01", " 01v2".
 _EPISODE = re.compile(
@@ -37,6 +38,8 @@ def series_title(video: str | Path) -> str:
     name = _TAGS.sub(" ", stem)
     name = re.sub(r"[\s._]+$", "", name)
     trimmed = _EPISODE.sub("", name).strip(" ._-")
+    if not trimmed and Path(video).parent.name:
+        return Path(video).parent.name     # "01.mp4": the folder names the series
     return re.sub(r"\s{2,}", " ", trimmed or name.strip() or stem)
 
 
@@ -46,9 +49,28 @@ def episode_label(video: str | Path) -> str:
     return m.group(1) if m else stem
 
 
-def memory_path(video: str | Path) -> Path:
-    title = re.sub(r'[<>:"/\\|?*]', "_", series_title(video))
-    return Path(video).parent / f"{title}{SUFFIX}"
+def _safe_title(video: str | Path) -> str:
+    return re.sub(r'[<>:"/\\|?*]', "_", series_title(video)).strip(" .") or "series"
+
+
+def series_dir(video: str | Path, out_dir: str | Path | None = None) -> Path:
+    """Folder that collects everything made for one series: subtitles, muxed videos, memory, faces.
+
+    It sits in the output folder (or beside the video). When that folder is already named after
+    the series, it is used as is instead of nesting a second folder with the same name.
+    """
+    base = Path(out_dir) if out_dir else Path(video).parent
+    title = _safe_title(video)
+    return base if base.name == title else base / title
+
+
+def memory_path(video: str | Path, out_dir: str | Path | None = None) -> Path:
+    return series_dir(video, out_dir) / f"{_safe_title(video)}{SUFFIX}"
+
+
+def legacy_memory_path(video: str | Path) -> Path:
+    """Where older versions kept the memory file: right beside the video."""
+    return Path(video).parent / f"{_safe_title(video)}{SUFFIX}"
 
 
 @dataclass
@@ -76,7 +98,9 @@ class SeriesMemory:
             "series": self.title,
             "known_characters": [
                 {"key": c.key, "name_src": c.name_src, "name_th": c.name_th, "gender": c.gender,
-                 "role": c.role, "relations": c.relations, "address_terms": c.address_terms}
+                 "role": c.role, "relations": c.relations, "address_terms": c.address_terms,
+                 "alignment": c.alignment, "self_pronoun": c.self_pronoun, "you_pronoun": c.you_pronoun,
+                 "speech_style": c.speech_style}
                 for c in self.characters
             ],
             "glossary": self.glossary,
@@ -102,6 +126,12 @@ class SeriesMemory:
             if known.gender == "unknown":
                 known.gender = ch.gender
             known.role = ch.role or known.role
+            # Established pronouns stay (the same voice every episode); fill only what is missing.
+            for attr in ("self_pronoun", "you_pronoun", "speech_style", "face"):
+                if not getattr(known, attr):
+                    setattr(known, attr, getattr(ch, attr))
+            if ch.alignment != "unknown":
+                known.alignment = ch.alignment       # a turn (hero to villain) is a real story event
             for r in ch.relations:
                 if r not in known.relations:
                     known.relations.append(r)
@@ -124,6 +154,12 @@ class SeriesMemory:
             bits = [f"**{c.name_th}** ({c.name_src}, `{c.key}`)", c.gender]
             if c.role:
                 bits.append(c.role)
+            if c.alignment in ALIGN_TH:
+                bits.append(ALIGN_TH[c.alignment])
+            if c.self_pronoun or c.you_pronoun:
+                bits.append(f"แทนตัว {c.self_pronoun or '-'} · เรียกคนอื่น {c.you_pronoun or '-'}")
+            if c.speech_style:
+                bits.append(c.speech_style)
             if c.relations:
                 bits.append("ความสัมพันธ์: " + ", ".join(c.relations))
             if c.address_terms:
@@ -154,7 +190,7 @@ class SeriesMemory:
             try:
                 d = json.loads(m.group(1))
                 mem.title = d.get("title") or title
-                mem.characters = [Character(**c) for c in d.get("characters", [])]
+                mem.characters = [Character.from_dict(c) for c in d.get("characters", [])]
                 mem.glossary = dict(d.get("glossary", {}))
                 mem.episodes = [EpisodeNote(**e) for e in d.get("episodes", [])]
             except (ValueError, TypeError, KeyError) as exc:
@@ -166,8 +202,10 @@ class SeriesMemory:
         return mem
 
 
-def load_memory(video: str | Path) -> SeriesMemory:
-    path = memory_path(video)
+def load_memory(video: str | Path, out_dir: str | Path | None = None) -> SeriesMemory:
+    path = memory_path(video, out_dir)
+    if not path.exists():
+        path = legacy_memory_path(video)          # carried over; the new file is written next save
     if not path.exists():
         return SeriesMemory(title=series_title(video))
     try:
@@ -177,12 +215,13 @@ def load_memory(video: str | Path) -> SeriesMemory:
         return SeriesMemory(title=series_title(video))
 
 
-def save_memory(video: str | Path, mem: SeriesMemory) -> Path | None:
+def save_memory(video: str | Path, mem: SeriesMemory, out_dir: str | Path | None = None) -> Path | None:
     """Write atomically, re-reading the user's notes first so an edit made meanwhile survives."""
-    path = memory_path(video)
+    path = memory_path(video, out_dir)
     try:
-        if path.exists():
-            mem.notes = load_memory(video).notes
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or legacy_memory_path(video).exists():
+            mem.notes = load_memory(video, out_dir).notes
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(mem.to_markdown(), encoding="utf-8")
         os.replace(tmp, path)

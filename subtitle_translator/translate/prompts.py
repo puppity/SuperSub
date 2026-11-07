@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 
 from ..core.models import Cue, Episode
@@ -23,6 +24,7 @@ Read every line. Work out:
 3. For every line id: the most likely speaker key ("unknown" if you cannot tell), who they are talking to (Thai name, comma-separated, or "ทุกคน"/"ตัวเอง"), and your confidence from 0 to 1.
 4. A Thai summary of the episode in at most 5 sentences.
 5. A glossary of recurring proper nouns and special terms (machines, places, techniques, teams) with one fixed Thai rendering each.
+6. For each character: their side in the story (hero, villain, neutral, or unknown) and the Thai voice that fits them. Give the word they use for "I" (e.g. ผม, ฉัน, หนู, เรา, ข้า, กู, ข้าพเจ้า), their usual word for "you" (e.g. คุณ, นาย, เธอ, แก, เจ้า, มึง, ท่าน), and a short Thai note on their register and how it changes with the listener. Base it on the source: 俺/貴様/てめえ, arrogant or threatening speech and villain roles suit ข้า/แก or กู/มึง; polite heroes suit ผม/ฉัน with คุณ/นาย/เธอ; elders and royalty suit ข้า/เจ้า; children often use หนู. Keep it natural for Thai subtitles.
 If SERIES MEMORY from earlier episodes is given: reuse the same key, Thai name and address terms for every character already listed, keep glossary renderings, and only add characters or terms that are new.
 Use evidence such as names and honorifics, gendered speech (〜わ, 〜ぜ, 僕, 俺, あたし), who answers whom, and the Name/Actor or style tag shown in the third column when present.
 Never invent characters who do not speak. Line ids are integers and must be copied exactly."""
@@ -31,7 +33,8 @@ SYSTEM_TRANSLATE = """You are a professional Thai subtitle translator for films,
 Translate the requested lines into natural spoken Thai that fits each speaker and listener.
 Rules:
 - Use the character sheet. Keep names, address terms and pronouns consistent for the whole episode.
-- Choose pronouns and sentence-final particles (ครับ/ค่ะ/นะ/จ้ะ/เว้ย...) from the speaker's gender, age and politeness toward the listener.
+- Each character has a Thai voice in the sheet: self_pronoun is their "I", you_pronoun their usual "you", speech_style how it shifts with the listener. Use it every time, so a villain keeps sounding like a villain (e.g. ข้า/แก) and a polite hero keeps ผม/คุณ. Change register only where the scene clearly calls for it (talking to a superior, losing their temper).
+- Choose sentence-final particles (ครับ/ค่ะ/นะ/จ้ะ/เว้ย...) from the speaker's gender, age and politeness toward the listener.
 - Japanese honorifics (-san, -chan, -kun, -senpai, -sensei, お姉ちゃん, お兄ちゃん) become natural Thai equivalents (คุณ, พี่, น้อง, รุ่นพี่, อาจารย์); never transliterate them.
 - Transliterate personal names the same way every time, as in the character sheet.
 - Keep each line short enough to read: aim for at most 17 Thai characters per second of the line's duration and at most 2 lines; use a newline for a 2-line subtitle.
@@ -58,13 +61,18 @@ ANALYZE_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["key", "name_src", "name_th", "gender", "role", "relations", "address_terms"],
+                "required": ["key", "name_src", "name_th", "gender", "role", "relations", "address_terms",
+                             "alignment", "self_pronoun", "you_pronoun", "speech_style"],
                 "properties": {
                     "key": {"type": "string"},
                     "name_src": {"type": "string"},
                     "name_th": {"type": "string"},
                     "gender": {"type": "string", "enum": ["male", "female", "unknown"]},
                     "role": {"type": "string"},
+                    "alignment": {"type": "string", "enum": ["hero", "villain", "neutral", "unknown"]},
+                    "self_pronoun": {"type": "string"},
+                    "you_pronoun": {"type": "string"},
+                    "speech_style": {"type": "string"},
                     "relations": {"type": "array", "items": {"type": "string"}},
                     "address_terms": {
                         "type": "array",
@@ -140,7 +148,9 @@ def format_sheet(ep: Episode) -> str:
         "glossary": ep.glossary,
         "characters": [
             {"key": ch.key, "name_src": ch.name_src, "name_th": ch.name_th, "gender": ch.gender,
-             "role": ch.role, "relations": ch.relations, "address_terms": ch.address_terms}
+             "role": ch.role, "relations": ch.relations, "address_terms": ch.address_terms,
+             "alignment": ch.alignment, "self_pronoun": ch.self_pronoun, "you_pronoun": ch.you_pronoun,
+             "speech_style": ch.speech_style}
             for ch in ep.characters
         ],
     }
@@ -148,3 +158,19 @@ def format_sheet(ep: Episode) -> str:
     if ep.series_notes:
         out += "\n\nTRANSLATOR NOTES FROM THE USER (follow them):\n" + ep.series_notes
     return out
+
+
+VISION_NOTE = """PICTURES: frames from the video are attached, each labelled with its time and the line id spoken at that moment.
+REFERENCE FACE pictures, when present, show characters already known from earlier episodes; use them to recognise those characters and keep their keys.
+Use the pictures to see who is on screen while a line is spoken, their apparent gender and age, clothing and expressions, and whether the scene frames them as a hero or a villain (menacing staging, dark lighting, henchmen, a protagonist's point of view). Let this sharpen speakers, gender, alignment and the Thai voice; the subtitles still decide what is said.
+For every character, set face_line to the line id of the frame that shows their face most clearly (alone, facing the camera if possible), or 0 if no frame shows it clearly.
+"""
+
+
+def vision_schema() -> dict:
+    """The analysis schema plus face_line per character, for the picture-reading mode."""
+    schema = copy.deepcopy(ANALYZE_SCHEMA)
+    char = schema["properties"]["characters"]["items"]
+    char["properties"]["face_line"] = {"type": "integer"}
+    char["required"] = char["required"] + ["face_line"]
+    return schema

@@ -138,3 +138,14 @@ def test_all_entry_points_map_errors_without_english_sdk_text(call):
         fn()
     assert e.value.kind is AIErrorKind.BAD_REQUEST
     assert "404" in str(e.value) and "not_found" not in str(e.value) and "claude-x" not in str(e.value)
+
+
+def test_build_params_puts_labelled_pictures_before_task():
+    import base64
+    from subtitle_translator.ai.backend import AIRequest
+    req = AIRequest(system="S", context="C", task="T", schema={}, images=[("FRAME 1", b"abc")])
+    content = build_params("claude-opus-5-5", req)["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "FRAME 1"}
+    assert content[1]["source"] == {"type": "base64", "media_type": "image/jpeg",
+                                    "data": base64.b64encode(b"abc").decode()}
+    assert content[2] == {"type": "text", "text": "T"}

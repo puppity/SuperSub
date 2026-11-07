@@ -30,6 +30,8 @@ class Settings:
     auto_transcribe: bool = True            # no subtitle at all: make one from the audio
     whisper_model: str = "large-v3-turbo"
     mux_mkv: bool = False                   # also write <video>.th.mkv with the Thai track
+    vision_mode: bool = False               # also show the AI frames from the video when analysing
+    vision_frames: int = 36
 
 
 def default_settings_path() -> Path:

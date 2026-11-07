@@ -350,6 +350,16 @@ class QueuePage(QWidget):
             self.model_box.setCurrentIndex(list(MODELS).index(self.s.model))
         self.model_box.currentIndexChanged.connect(self._model_changed)
         sl.addWidget(self.model_box)
+        sl.addWidget(self._field_label("โหมดวิเคราะห์ตัวละคร"))
+        self.mode_box = QComboBox()
+        self.mode_box.addItem("ปกติ · อ่านจากซับอย่างเดียว", False)
+        self.mode_box.addItem("อ่านภาพ · ดูหน้าตัวละครจากวิดีโอด้วย", True)
+        self.mode_box.setCurrentIndex(1 if self.s.vision_mode else 0)
+        self.mode_box.setToolTip("โหมดอ่านภาพเก็บภาพจากวิดีโอราว 36 ภาพ ให้ AI ดูหน้า อายุ ฝ่ายดี/ร้าย "
+                                 "แล้วเลือกคำแทนตัว (ผม/ฉัน/ข้า/แก) ให้เหมาะ · จำหน้าตัวละครไว้ใช้ตอนต่อไป "
+                                 "· ใช้ token เพิ่มราว 10k ต่อตอน")
+        self.mode_box.currentIndexChanged.connect(self._mode_changed)
+        sl.addWidget(self.mode_box)
         sl.addWidget(self._field_label("ค่าใช้จ่ายโดยประมาณ"))
         self.total = QLabel()
         self.total.setProperty("role", "stat")
@@ -531,6 +541,10 @@ class QueuePage(QWidget):
         self.s.backend = "claude_code" if index == 1 else "api"
         self._persist()
         self._refresh_total()
+
+    def _mode_changed(self, index: int) -> None:
+        self.s.vision_mode = bool(self.mode_box.itemData(index))
+        self._persist()
 
     def _model_changed(self, index: int) -> None:
         self.s.model = self.model_box.itemData(index)

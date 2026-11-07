@@ -10,9 +10,11 @@ ANALYSIS = {
     "characters": [
         {"key": "yuki", "name_src": "ユキ", "name_th": "ยูกิ", "gender": "female",
          "role": "พี่สาว ม.ปลาย", "relations": ["พี่สาวของฮารุ"],
-         "address_terms": [{"source": "お姉ちゃん", "thai": "พี่"}]},
+         "address_terms": [{"source": "お姉ちゃん", "thai": "พี่"}],
+         "alignment": "hero", "self_pronoun": "ฉัน", "you_pronoun": "เธอ", "speech_style": "สุภาพ"},
         {"key": "haru", "name_src": "ハル", "name_th": "ฮารุ", "gender": "female",
-         "role": "น้องสาว ม.ต้น", "relations": ["น้องสาวของยูกิ"], "address_terms": []},
+         "role": "น้องสาว ม.ต้น", "relations": ["น้องสาวของยูกิ"], "address_terms": [],
+         "alignment": "neutral", "self_pronoun": "หนู", "you_pronoun": "พี่", "speech_style": ""},
     ],
     "cues": [
         {"id": 1, "speaker": "haru", "addressee": "ยูกิ", "confidence": 0.9},
@@ -77,3 +79,14 @@ def test_build_request_is_stable_for_caching():
     a = build_analyze_request(ep, "high")
     b = build_analyze_request(ep, "high")
     assert (a.system, a.context) == (b.system, b.context)
+
+
+def test_voice_fields_reach_episode_and_translate_sheet():
+    from subtitle_translator.translate.analyze import apply_analysis
+    from subtitle_translator.translate.prompts import format_sheet
+    ep = make_episode(3)
+    apply_analysis(ep, ANALYSIS)
+    yuki = ep.character("yuki")
+    assert (yuki.alignment, yuki.self_pronoun, yuki.you_pronoun) == ("hero", "ฉัน", "เธอ")
+    sheet = format_sheet(ep)
+    assert '"self_pronoun": "ฉัน"' in sheet and '"alignment": "hero"' in sheet

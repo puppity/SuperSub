@@ -55,17 +55,19 @@ def test_memory_round_trip_keeps_user_notes_and_merges(tmp_path):
 
 
 def test_known_characters_keep_colour_and_thai_name(tmp_path):
-    known = [Character("gou", "Gou", "โก", "male", color="#FBBF24")]
+    known = [Character("gou", "Gou", "โก", "male", color="#FBBF24", self_pronoun="ข้า")]
     ep = _ep(tmp_path, "Show - 02.mkv", [])
     data = {"summary": "s", "glossary": [{"source": "WGP", "thai": "ดับเบิลยูจีพี"}], "cues": [],
             "characters": [
                 {"key": "gou", "name_src": "Gou", "name_th": "โกะ", "gender": "male", "role": "",
-                 "relations": [], "address_terms": []},
+                 "relations": [], "address_terms": [], "alignment": "villain",
+                 "self_pronoun": "กู", "you_pronoun": "มึง", "speech_style": ""},
                 {"key": "jun", "name_src": "Jun", "name_th": "จุน", "gender": "female", "role": "",
                  "relations": [], "address_terms": []}]}
     apply_analysis(ep, data, known)
     gou, jun = ep.characters
     assert (gou.name_th, gou.color) == ("โก", "#FBBF24")
+    assert (gou.self_pronoun, gou.you_pronoun, gou.alignment) == ("ข้า", "มึง", "villain")
     assert jun.color != "#FBBF24"
     assert ep.glossary == {"WGP": "ดับเบิลยูจีพี"}
 
@@ -74,3 +76,32 @@ def test_unwritable_folder_does_not_raise(tmp_path, monkeypatch):
     import os
     monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(PermissionError("ro")))
     assert save_memory(tmp_path / "Show - 01.mkv", SeriesMemory(title="Show")) is None
+
+
+def test_series_folder_collects_outputs_and_reads_legacy_memory(tmp_path):
+    from subtitle_translator.core.series import legacy_memory_path, series_dir
+    v = tmp_path / "Show - 01.mkv"
+    assert series_dir(v) == tmp_path / "Show"
+    assert series_dir(v, tmp_path / "out") == tmp_path / "out" / "Show"
+    numbered = tmp_path / "หนังพี่บอล" / "01.mp4"           # bare episode number: folder is the title
+    assert series_title(numbered) == "หนังพี่บอล" and series_dir(numbered) == numbered.parent
+    old = legacy_memory_path(v)
+    old.write_text(SeriesMemory(title="Show", notes="ใช้คำว่า ข้า").to_markdown(), encoding="utf-8")
+    mem = load_memory(v)
+    assert mem.notes == "ใช้คำว่า ข้า"                       # older file beside the video still read
+    saved = save_memory(v, mem)
+    assert saved == tmp_path / "Show" / "Show.series.md" and old.exists()
+    assert load_memory(v).notes == "ใช้คำว่า ข้า"
+
+
+def test_old_memory_without_voice_fields_still_loads_and_markdown_shows_voice():
+    import json
+    old = {"version": 1, "title": "Show", "glossary": {}, "episodes": [],
+           "characters": [{"key": "a", "name_src": "A", "name_th": "เอ", "gender": "male", "role": "",
+                           "relations": [], "address_terms": {}, "color": "#FFFFFF", "retired": 1}]}
+    text = "<!-- series-data\n" + json.dumps(old) + "\n-->"
+    mem = SeriesMemory.from_markdown(text, "Show")
+    assert mem.characters[0].self_pronoun == "" and mem.characters[0].alignment == "unknown"
+    mem.characters[0].alignment, mem.characters[0].self_pronoun = "villain", "ข้า"
+    md = mem.to_markdown()
+    assert "ฝ่ายร้าย" in md and "แทนตัว ข้า" in md

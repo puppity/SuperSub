@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 from ..ai.backend import AIBackend
-from ..core.media import SubTrack, extract_sub, lang_of
+from ..core.frames import capture, pick_cues
+from ..core.media import MediaError, SubTrack, extract_sub, lang_of
 from ..core.models import Episode, Project
 from ..core.project_store import load_project, save_project
 from ..core.settings import Settings
@@ -53,6 +55,21 @@ def prepare_project(video: str | Path, source: SubTrack | Path | Transcribe, set
     return project
 
 
+def _capture_frames(ep, settings: Settings, tmp: Path, progress, should_stop):
+    """Frames for the picture-reading mode. A video that cannot be read falls back to text only."""
+    stage = "เก็บภาพจากวิดีโอ"
+    progress(stage, 0.0)
+    cues = pick_cues(ep.cues, settings.vision_frames)
+    try:
+        frames = capture(ep.video_path, cues, tmp, lambda f: progress(stage, f), should_stop)
+    except MediaError as exc:
+        log.warning("picture mode skipped: %s", exc)
+        return None
+    if should_stop():
+        raise Stopped()
+    return frames
+
+
 def run_project(project: Project, backend: AIBackend, settings: Settings,
                 progress: Callable[[str, float], None], should_stop: Callable[[], bool],
                 save: Callable[[Project], object] = save_project) -> Project:
@@ -60,15 +77,19 @@ def run_project(project: Project, backend: AIBackend, settings: Settings,
     project.backend, project.model = backend.name, backend.model
     if project.stage == "extracted":
         progress("วิเคราะห์ตัวละคร", 0.0)
-        memory = load_memory(ep.video_path)          # what earlier episodes of this series taught us
+        memory = load_memory(ep.video_path, settings.output_dir)          # what earlier episodes of this series taught us
         ep.glossary = dict(memory.glossary)
         ep.series_notes = memory.notes
-        res = analyze(ep, backend, settings.effort_analyze, memory)
+        with tempfile.TemporaryDirectory(prefix="subtrans-frames-") as tmp:
+            frames = (_capture_frames(ep, settings, Path(tmp), progress, should_stop)
+                      if settings.vision_mode else None)
+            progress("วิเคราะห์ตัวละคร (อ่านภาพ)" if frames else "วิเคราะห์ตัวละคร", 0.0)
+            res = analyze(ep, backend, settings.effort_analyze, memory, frames, settings.output_dir)
         project.cost_usd += res.cost_usd or 0.0
         project.stage = "analyzed"
         save(project)
         memory.merge_episode(ep)
-        save_memory(ep.video_path, memory)
+        save_memory(ep.video_path, memory, settings.output_dir)
     if project.stage in ("analyzed", "translating"):
         project.stage = "translating"
         chunks = make_chunks(ep.cues, project.chunk_size)
