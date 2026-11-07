@@ -4,13 +4,13 @@ import logging
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QSizeF, Qt, QTimer, QUrl
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPen, QPixmap, QShortcut
+from PySide6.QtCore import QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QKeySequence, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QColorDialog, QComboBox, QFrame, QGraphicsPixmapItem, QGraphicsScene,
-    QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QGraphicsPathItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -65,11 +65,16 @@ class VideoPreview(QGraphicsView):
         self.setMinimumSize(420, 236)
         self.video = QGraphicsVideoItem()
         self.still = QGraphicsPixmapItem()
-        self.text = QGraphicsSimpleTextItem()
-        font = QFont("Leelawadee UI", 18, QFont.DemiBold)
-        self.text.setFont(font)
-        self.text.setPen(QPen(QColor("#000000"), 1.2))
-        for item in (self.video, self.still, self.text):
+        # Subtitle overlay drawn as a path: a thick dark outline under a coloured fill,
+        # like a real subtitle renderer. The old 1px pen on a simple text item made Thai
+        # glyphs look broken and its tight bounding box clipped upper vowels/tone marks.
+        self.outline = QGraphicsPathItem()
+        self.outline.setPen(QPen(QColor(0, 0, 0, 230), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        self.outline.setBrush(Qt.NoBrush)
+        self.text = QGraphicsPathItem()
+        self.text.setPen(Qt.NoPen)
+        self._caption = ""
+        for item in (self.video, self.still, self.outline, self.text):
             self.scene().addItem(item)
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -85,29 +90,77 @@ class VideoPreview(QGraphicsView):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(150)
         self._debounce.timeout.connect(self._start_grab)
+        # Qt's FFmpeg backend can open a file yet never decode a frame (AV1 without a
+        # hardware decoder) and it raises no error. If no frame shows up soon after a
+        # seek, switch to still frames grabbed by our bundled ffmpeg instead.
+        self._got_frame = False
+        self.video.videoSink().videoFrameChanged.connect(self._on_video_frame)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
+        self._watchdog = QTimer(self)
+        self._watchdog.setSingleShot(True)
+        self._watchdog.setInterval(2500)
+        self._watchdog.timeout.connect(self._check_decoding)
+        self._last_cue: Cue | None = None
+
+    fallback_changed = Signal(bool)
 
     def set_source(self, path: str) -> None:
-        self.path, self.fallback = path, False
+        self.path = path
+        self._set_fallback(False)
         self._want = None
+        self._got_frame = False
+        self._last_cue = None
         self.still.setPixmap(QPixmap())
         self._load_media(path)
 
     def _load_media(self, path: str) -> None:
         self.player.setSource(QUrl.fromLocalFile(path))
 
+    def _set_fallback(self, on: bool) -> None:
+        if self.fallback == on:
+            return
+        self.fallback = on
+        self.video.setVisible(not on)
+        self.fallback_changed.emit(on)
+
+    def _go_still(self, reason: str) -> None:
+        if self.fallback or not self.path:
+            return
+        log.warning("in-app video unavailable (%s), using still frames", reason)
+        self.player.stop()
+        self._set_fallback(True)
+        if self._last_cue is not None:
+            self._want = (self.path, (self._last_cue.start + self._last_cue.end) / 2)
+            self._debounce.start()
+
     def _on_error(self, *_):
-        log.warning("video playback failed, using still frames: %s", self.player.errorString())
-        self.fallback = True
+        self._go_still(self.player.errorString() or "player error")
+
+    def _on_media_status(self, status) -> None:
+        if status == QMediaPlayer.InvalidMedia:
+            self._go_still("invalid media")
+
+    def _on_video_frame(self, frame) -> None:
+        if frame.isValid():
+            self._got_frame = True
+            self._watchdog.stop()
+
+    def _check_decoding(self) -> None:
+        if not self._got_frame:
+            self._go_still("no decoded frame")
 
     def show_cue(self, cue: Cue, text: str, color: str) -> None:
-        self.text.setText(text)
+        self._caption = text
         self.text.setBrush(QBrush(QColor(color)))
+        self._last_cue = cue
         if self.fallback and self.path:
             self._want = (self.path, (cue.start + cue.end) / 2)
             self._debounce.start()
         else:
             self.player.pause()
             self.player.setPosition(int(cue.start * 1000))
+            if not self._got_frame and self.path:
+                self._watchdog.start()
         self._layout()
 
     def _start_grab(self) -> None:
@@ -118,7 +171,7 @@ class VideoPreview(QGraphicsView):
         path, t = self._want
         self._started = self._want
         out = cache_dir() / "preview.png"
-        worker = CallWorker(lambda: grab_frame(path, t, out))
+        worker = CallWorker(lambda: grab_frame(path, t, out, width=960))
         worker.done.connect(lambda png, k=(path, t): self._on_frame(k, png))
         worker.failed.connect(lambda exc, k=(path, t): self._on_frame(k, None))
         worker.finished.connect(self._on_grab_finished)
@@ -134,7 +187,10 @@ class VideoPreview(QGraphicsView):
             self.still.setPixmap(QPixmap())
             return
         pix = QPixmap(str(png))
-        self.still.setPixmap(pix.scaled(self.viewport().size(), Qt.KeepAspectRatio) if not pix.isNull() else pix)
+        if not pix.isNull():
+            pix = pix.scaled(self.viewport().size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.still.setPixmap(pix)
+        self._layout()
 
     def _on_grab_finished(self) -> None:
         if self._grab is not None:
@@ -145,6 +201,7 @@ class VideoPreview(QGraphicsView):
 
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         self._debounce.stop()
+        self._watchdog.stop()
         self._want = None
         # Release the media before the widget dies: the FFmpeg backend's native
         # threads can otherwise outlive the player and crash on teardown.
@@ -157,6 +214,8 @@ class VideoPreview(QGraphicsView):
         return True
 
     def toggle(self) -> None:
+        if self.fallback:
+            return
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         else:
@@ -170,8 +229,34 @@ class VideoPreview(QGraphicsView):
         size = self.viewport().size()
         self.scene().setSceneRect(0, 0, size.width(), size.height())
         self.video.setSize(QSizeF(size.width(), size.height()))
-        r = self.text.boundingRect()
-        self.text.setPos((size.width() - r.width()) / 2, size.height() - r.height() - 16)
+        if not self.still.pixmap().isNull():
+            pix = self.still.pixmap()
+            self.still.setPos((size.width() - pix.width()) / 2, (size.height() - pix.height()) / 2)
+        self._layout_caption(size.width(), size.height())
+
+    def _layout_caption(self, w: float, h: float) -> None:
+        pix = self.still.pixmap()
+        frame_h = pix.height() if self.fallback and not pix.isNull() else min(h, w * 9 / 16)
+        frame_w = pix.width() if self.fallback and not pix.isNull() else w
+        bottom = (h + frame_h) / 2 if self.fallback and not pix.isNull() else h
+        font = QFont("Leelawadee UI")
+        font.setWeight(QFont.DemiBold)
+        lines = self._caption.splitlines() or [""]
+        size = max(14, int(frame_h * 0.065))
+        while size > 12:                          # shrink until the widest line fits the frame
+            font.setPixelSize(size)
+            fm = QFontMetricsF(font)
+            if max(fm.horizontalAdvance(line) for line in lines) <= frame_w * 0.92:
+                break
+            size -= 1
+        line_h = font.pixelSize() * 1.45          # room for Thai upper vowels and tone marks
+        path = QPainterPath()
+        for i, line in enumerate(lines):
+            x = (w - fm.horizontalAdvance(line)) / 2
+            y = bottom - 14 - (len(lines) - 1 - i) * line_h - fm.descent()
+            path.addText(x, y, font, line)
+        self.outline.setPath(path)
+        self.text.setPath(path)
 
 
 class ReviewPage(QWidget):
@@ -227,8 +312,9 @@ class ReviewPage(QWidget):
         left = QVBoxLayout()
         self.preview = VideoPreview()
         left.addWidget(self.preview, 3)
-        play = QPushButton("เล่น / หยุด  (F5)")
+        self.play_btn = play = QPushButton("เล่น / หยุด  (F5)")
         play.clicked.connect(self.preview.toggle)
+        self.preview.fallback_changed.connect(self._on_preview_fallback)
         left.addWidget(play)
         chars_card = QFrame()
         chars_card.setProperty("card", True)
@@ -299,6 +385,11 @@ class ReviewPage(QWidget):
 
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.save_edit)
         QShortcut(QKeySequence("F5"), self, activated=self.preview.toggle)
+
+    def _on_preview_fallback(self, still: bool) -> None:
+        self.play_btn.setEnabled(not still)
+        self.play_btn.setText("วิดีโอนี้เล่นในโปรแกรมไม่ได้ · แสดงภาพนิ่งของแต่ละบรรทัดแทน"
+                              if still else "เล่น / หยุด  (F5)")
 
     # ----- data helpers -----
     def _colors(self) -> dict[str | None, str]:

@@ -677,3 +677,24 @@ def test_progress_status_shows_elapsed_time_for_long_steps(qtbot, monkeypatch):
     assert page.cards[0].status.property("tone") == "busy"
     page._on_failed(0, "x")
     assert not page._tick.isActive()
+
+
+def test_preview_falls_back_to_stills_when_no_frame_decodes(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    grabs = []
+    monkeypatch.setattr(rp, "grab_frame", lambda v, t, out, width=640: (grabs.append(t), tmp_path / "x.png")[1])
+    ep = review_project(tmp_path).episode
+    pv = rp.VideoPreview()
+    qtbot.addWidget(pv)
+    seen = []
+    pv.fallback_changed.connect(seen.append)
+    pv.set_source(str(tmp_path / "EP01.mkv"))          # _load_media is stubbed: no frame will ever arrive
+    pv._watchdog.setInterval(50)
+    pv.show_cue(ep.cues[0], "ไทย", "#fff")
+    qtbot.waitUntil(lambda: pv.fallback and len(grabs) > 0, timeout=3000)
+    assert seen == [True]
+    assert grabs[0] == (ep.cues[0].start + ep.cues[0].end) / 2
+    pv.toggle()                                         # play is a no-op on stills
+    pv.set_source(str(tmp_path / "EP02.mkv"))
+    assert not pv.fallback and seen == [True, False]
+    pv.shutdown(3000)
