@@ -46,6 +46,8 @@ class Episode:
     cues: list[Cue]
     characters: list[Character] = field(default_factory=list)
     summary: str = ""
+    glossary: dict[str, str] = field(default_factory=dict)    # source term -> Thai, kept across episodes
+    series_notes: str = ""            # the user's notes from the series memory file
 
     def cue(self, cue_id: int) -> Cue:
         for c in self.cues:
@@ -87,6 +89,8 @@ class Project:
             cues=[Cue(**c) for c in e["cues"]],
             characters=[Character(**c) for c in e["characters"]],
             summary=e.get("summary", ""),
+            glossary=dict(e.get("glossary", {})),
+            series_notes=e.get("series_notes", ""),
         )
         return cls(
             episode=episode,

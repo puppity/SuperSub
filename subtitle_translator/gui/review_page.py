@@ -4,14 +4,14 @@ import logging
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QSettings, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QKeySequence, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QColorDialog, QComboBox, QFrame, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsPathItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..ai.factory import make_backend
@@ -308,14 +308,25 @@ class ReviewPage(QWidget):
         head.addWidget(export)
         root.addLayout(head)
 
-        body = QHBoxLayout()
-        left = QVBoxLayout()
+        # Drag the splitter handles to resize: preview vs. table, preview vs. cast, body vs. timeline.
+        self.body_split = QSplitter(Qt.Horizontal)
+        self.left_split = QSplitter(Qt.Vertical)
+        self.outer_split = QSplitter(Qt.Vertical)
+        for s in (self.body_split, self.left_split, self.outer_split):
+            s.setChildrenCollapsible(False)
+            s.setHandleWidth(8)
+
+        preview_box = QWidget()
+        left = QVBoxLayout(preview_box)
+        left.setContentsMargins(0, 0, 0, 0)
         self.preview = VideoPreview()
-        left.addWidget(self.preview, 3)
+        self.preview.setMinimumSize(240, 135)
+        left.addWidget(self.preview, 1)
         self.play_btn = play = QPushButton("เล่น / หยุด  (F5)")
         play.clicked.connect(self.preview.toggle)
         self.preview.fallback_changed.connect(self._on_preview_fallback)
         left.addWidget(play)
+        self.left_split.addWidget(preview_box)
         chars_card = QFrame()
         chars_card.setProperty("card", True)
         cl = QVBoxLayout(chars_card)
@@ -326,10 +337,14 @@ class ReviewPage(QWidget):
         self.chars.setToolTip("ดับเบิลคลิกเพื่อเปลี่ยนสีตัวละคร")
         self.chars.itemDoubleClicked.connect(self.edit_character_color)
         cl.addWidget(self.chars)
-        left.addWidget(chars_card, 2)
-        body.addLayout(left, 2)
+        self.left_split.addWidget(chars_card)
+        self.left_split.setStretchFactor(0, 3)
+        self.left_split.setStretchFactor(1, 2)
+        self.body_split.addWidget(self.left_split)
 
-        right = QVBoxLayout()
+        right_box = QWidget()
+        right = QVBoxLayout(right_box)
+        right.setContentsMargins(0, 0, 0, 0)
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.verticalHeader().setVisible(False)
@@ -376,12 +391,18 @@ class ReviewPage(QWidget):
         self.editor.textChanged.connect(self._update_cps)
         el.addWidget(self.editor)
         right.addWidget(edit_card)
-        body.addLayout(right, 3)
-        root.addLayout(body, 1)
+        self.body_split.addWidget(right_box)
+        self.body_split.setStretchFactor(0, 2)
+        self.body_split.setStretchFactor(1, 3)
+        self.outer_split.addWidget(self.body_split)
 
         self.timeline = TimelineWidget()
         self.timeline.cue_clicked.connect(self.select)
-        root.addWidget(self.timeline)
+        self.outer_split.addWidget(self.timeline)
+        self.outer_split.setStretchFactor(0, 1)
+        self.outer_split.setStretchFactor(1, 0)
+        root.addWidget(self.outer_split, 1)
+        self._restore_splits()
 
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.save_edit)
         QShortcut(QKeySequence("F5"), self, activated=self.preview.toggle)
@@ -569,6 +590,26 @@ class ReviewPage(QWidget):
         current = self.current
         self._refresh_row(current)
         self.select(current)
+
+    SPLITS = ("body_split", "left_split", "outer_split")
+
+    @staticmethod
+    def _split_store() -> QSettings:
+        return QSettings("SubTranslator", "review")
+
+    def _restore_splits(self) -> None:
+        """Bring back the pane sizes the user dragged to last time."""
+        store = self._split_store()
+        for name in self.SPLITS:
+            state = store.value(name)
+            if state is not None:
+                getattr(self, name).restoreState(state)
+            getattr(self, name).splitterMoved.connect(self._save_splits)
+
+    def _save_splits(self, *_):
+        store = self._split_store()
+        for name in self.SPLITS:
+            store.setValue(name, getattr(self, name).saveState())
 
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         """Join background threads. True when nothing is left running."""

@@ -13,6 +13,8 @@ Read every line. Work out:
 2. For each character, the Thai address terms other characters should use for them, derived from the source (e.g. お姉ちゃん -> พี่, 先生 -> อาจารย์, "sis" -> พี่).
 3. For every line id: the most likely speaker key ("unknown" if you cannot tell), who they are talking to (Thai name, comma-separated, or "ทุกคน"/"ตัวเอง"), and your confidence from 0 to 1.
 4. A Thai summary of the episode in at most 5 sentences.
+5. A glossary of recurring proper nouns and special terms (machines, places, techniques, teams) with one fixed Thai rendering each.
+If SERIES MEMORY from earlier episodes is given: reuse the same key, Thai name and address terms for every character already listed, keep glossary renderings, and only add characters or terms that are new.
 Use evidence such as names and honorifics, gendered speech (〜わ, 〜ぜ, 僕, 俺, あたし), who answers whom, and the Name/Actor or style tag shown in the third column when present.
 Never invent characters who do not speak. Line ids are integers and must be copied exactly."""
 
@@ -30,9 +32,18 @@ Rules:
 ANALYZE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "characters", "cues"],
+    "required": ["summary", "characters", "glossary", "cues"],
     "properties": {
         "summary": {"type": "string"},
+        "glossary": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["source", "thai"],
+                "properties": {"source": {"type": "string"}, "thai": {"type": "string"}},
+            },
+        },
         "characters": {
             "type": "array",
             "items": {
@@ -117,10 +128,14 @@ def format_cues(cues: list[Cue], names: dict[str, str] | None = None) -> str:
 def format_sheet(ep: Episode) -> str:
     sheet = {
         "summary": ep.summary,
+        "glossary": ep.glossary,
         "characters": [
             {"key": ch.key, "name_src": ch.name_src, "name_th": ch.name_th, "gender": ch.gender,
              "role": ch.role, "relations": ch.relations, "address_terms": ch.address_terms}
             for ch in ep.characters
         ],
     }
-    return "CHARACTER SHEET:\n" + json.dumps(sheet, ensure_ascii=False, indent=1)
+    out = "CHARACTER SHEET:\n" + json.dumps(sheet, ensure_ascii=False, indent=1)
+    if ep.series_notes:
+        out += "\n\nTRANSLATOR NOTES FROM THE USER (follow them):\n" + ep.series_notes
+    return out

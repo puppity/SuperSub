@@ -698,3 +698,26 @@ def test_preview_falls_back_to_stills_when_no_frame_decodes(qtbot, tmp_path, mon
     pv.set_source(str(tmp_path / "EP02.mkv"))
     assert not pv.fallback and seen == [True, False]
     pv.shutdown(3000)
+
+
+def test_review_panes_are_resizable_and_remember_sizes(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from PySide6.QtCore import QSettings
+    from subtitle_translator.gui.review_page import ReviewPage
+    ini = str(tmp_path / "review.ini")
+    monkeypatch.setattr(ReviewPage, "_split_store", staticmethod(lambda: QSettings(ini, QSettings.IniFormat)))
+    page = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(page)
+    page.resize(1400, 900)
+    page.show()
+    qtbot.waitExposed(page)
+    page.body_split.setSizes([900, 500])
+    page.body_split.splitterMoved.emit(900, 1)
+    wide = page.body_split.sizes()[0]
+
+    again = ReviewPage(Settings(), lambda: None)
+    qtbot.addWidget(again)
+    again.resize(1400, 900)
+    again.show()
+    qtbot.waitExposed(again)
+    assert abs(again.body_split.sizes()[0] - wide) <= 20
+    assert again.left_split.count() == 2 and again.outer_split.count() == 2

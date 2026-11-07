@@ -10,7 +10,7 @@ from subtitle_translator.translate.pipeline import (
 )
 
 SRT = "".join(f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},900\nline {i}\n\n" for i in range(1, 26))
-ANALYSIS = {"summary": "s", "characters": [], "cues": []}
+ANALYSIS = {"summary": "s", "characters": [], "glossary": [], "cues": []}
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ from subtitle_translator.translate.prompts import ANALYZE_SCHEMA, format_cues
 
 ANALYSIS = {
     "summary": "พี่น้องสาวตื่นสายไปโรงเรียน",
+    "glossary": [{"source": "Cyclone Magnum", "thai": "ไซโคลนแม็กนั่ม"}],
     "characters": [
         {"key": "yuki", "name_src": "ユキ", "name_th": "ยูกิ", "gender": "female",
          "role": "พี่สาว ม.ปลาย", "relations": ["พี่สาวของฮารุ"],

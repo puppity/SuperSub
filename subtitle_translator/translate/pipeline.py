@@ -10,6 +10,7 @@ from ..core.models import Episode, Project
 from ..core.project_store import load_project, save_project
 from ..core.settings import Settings
 from ..core.subio import guess_lang, load_cues
+from ..core.series import load_memory, save_memory
 from .analyze import analyze, build_analyze_request
 from .translate import build_translate_request, make_chunks, translate_chunk
 
@@ -47,10 +48,15 @@ def run_project(project: Project, backend: AIBackend, settings: Settings,
     project.backend, project.model = backend.name, backend.model
     if project.stage == "extracted":
         progress("วิเคราะห์ตัวละคร", 0.0)
-        res = analyze(ep, backend, settings.effort_analyze)
+        memory = load_memory(ep.video_path)          # what earlier episodes of this series taught us
+        ep.glossary = dict(memory.glossary)
+        ep.series_notes = memory.notes
+        res = analyze(ep, backend, settings.effort_analyze, memory)
         project.cost_usd += res.cost_usd or 0.0
         project.stage = "analyzed"
         save(project)
+        memory.merge_episode(ep)
+        save_memory(ep.video_path, memory)
     if project.stage in ("analyzed", "translating"):
         project.stage = "translating"
         chunks = make_chunks(ep.cues, project.chunk_size)
