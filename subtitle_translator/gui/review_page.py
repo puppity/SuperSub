@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..ai.factory import make_backend
 from ..core.media import MediaError, grab_frame
+from ..core.proxy import ProxyJob, ensure_proxy, needs_proxy
 from ..core.models import Cue, Project, untranslated_ids
 from ..core.project_store import save_project
 from ..core.settings import Settings, cache_dir
@@ -101,8 +102,14 @@ class VideoPreview(QGraphicsView):
         self._watchdog.setInterval(2500)
         self._watchdog.timeout.connect(self._check_decoding)
         self._last_cue: Cue | None = None
+        # AV1 and friends: show stills while a playable H.264 copy is built in the background.
+        self._proxy: ProxyJob | None = None
+        self._proxy_timer = QTimer(self)
+        self._proxy_timer.setInterval(1000)
+        self._proxy_timer.timeout.connect(self._poll_proxy)
 
     fallback_changed = Signal(bool)
+    status_changed = Signal(str)          # text for the play button while there is no playable video
 
     def set_source(self, path: str) -> None:
         self.path = path
@@ -110,8 +117,45 @@ class VideoPreview(QGraphicsView):
         self._want = None
         self._got_frame = False
         self._last_cue = None
+        self._proxy = None
+        self._proxy_timer.stop()
         self.still.setPixmap(QPixmap())
+        if needs_proxy(path):
+            job = ensure_proxy(path)
+            if job.ready:
+                self._load_media(str(job.out))
+                return
+            self.player.setSource(QUrl())        # never hand Qt a file it cannot decode
+            self._proxy = job
+            self._set_fallback(True)
+            self._proxy_timer.start()
+            self._poll_proxy()
+            return
         self._load_media(path)
+
+    def _poll_proxy(self) -> None:
+        job = self._proxy
+        if job is None:
+            self._proxy_timer.stop()
+            return
+        if job.ready:
+            self._proxy_timer.stop()
+            self._proxy = None
+            self._got_frame = False
+            self._set_fallback(False)
+            self._load_media(str(job.out))
+            if self._last_cue is not None:
+                self.player.setPosition(int(self._last_cue.start * 1000))
+                self._watchdog.start()
+            self._layout()
+            return
+        if job.error:
+            self._proxy_timer.stop()
+            self.status_changed.emit(job.error + " · แสดงภาพนิ่งแทน")
+            return
+        if not job.running:
+            job.start()
+        self.status_changed.emit(f"กำลังเตรียมวิดีโอสำหรับเล่น {int(job.fraction * 100)}% · ระหว่างนี้แสดงภาพนิ่ง")
 
     def _load_media(self, path: str) -> None:
         self.player.setSource(QUrl.fromLocalFile(path))
@@ -202,6 +246,7 @@ class VideoPreview(QGraphicsView):
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         self._debounce.stop()
         self._watchdog.stop()
+        self._proxy_timer.stop()
         self._want = None
         # Release the media before the widget dies: the FFmpeg backend's native
         # threads can otherwise outlive the player and crash on teardown.
@@ -327,6 +372,7 @@ class ReviewPage(QWidget):
         self.play_btn = play = QPushButton("เล่น / หยุด  (F5)")
         play.clicked.connect(self.preview.toggle)
         self.preview.fallback_changed.connect(self._on_preview_fallback)
+        self.preview.status_changed.connect(self.play_btn.setText)
         left.addWidget(play)
         self.left_split.addWidget(preview_box)
         chars_card = QFrame()

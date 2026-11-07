@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from ..ai.backend import AIError, AIErrorKind
 from ..ai.factory import make_backend
 from ..core.media import MediaError, SubTrack, lang_of, list_sub_tracks, pick_track, sidecar_subs
+from ..core.proxy import ensure_proxy, needs_proxy
 from ..core.transcribe import TRANSCRIBE, Transcribe, TranscribeError
 from ..core.models import Project, untranslated_ids
 from ..core.pricing import MODELS
@@ -92,6 +93,8 @@ class QueueRunner(QThread):
                 return
             try:
                 backend = make_backend(self.settings)
+                if needs_proxy(item.video):        # build the playable preview while the AI works
+                    ensure_proxy(item.video)
                 report = lambda stage, f, r=row: self.item_progress.emit(r, stage, f)
                 project = prepare_project(item.video, item.source, self.settings, cache_dir(),
                                           report, lambda: self._stop)

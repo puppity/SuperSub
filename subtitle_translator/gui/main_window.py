@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ..core.proxy import stop_all as stop_proxies
 from ..core.settings import Settings, save_settings
 from .queue_page import QueuePage
 from .review_page import ReviewPage
@@ -114,6 +115,7 @@ class MainWindow(QMainWindow):
         pages = (self.queue_page, self.review_page, self.settings_page)
         results = [page.shutdown() for page in pages]     # stop every page, not just the first
         if all(results):
+            stop_proxies()                 # never leave a background ffmpeg running
             event.accept()
             return
         for page in pages:

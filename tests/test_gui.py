@@ -724,3 +724,27 @@ def test_review_panes_are_resizable_and_remember_sizes(qtbot, tmp_path, monkeypa
     qtbot.waitExposed(again)
     assert abs(again.body_split.sizes()[0] - wide) <= 20
     assert again.left_split.count() == 2 and again.outer_split.count() == 2
+
+
+def test_av1_preview_shows_stills_then_switches_to_playable_copy(qtbot, tmp_path, monkeypatch, no_real_ai):
+    from subtitle_translator.gui import review_page as rp
+    monkeypatch.setattr(rp, "grab_frame", lambda *a, **k: tmp_path / "x.png")
+    out = tmp_path / "proxy.mp4"
+    from types import SimpleNamespace
+    job = SimpleNamespace(out=out, fraction=0.5, error=None, running=True, ready=False, start=lambda: None)
+    monkeypatch.setattr(rp, "needs_proxy", lambda p: True)
+    monkeypatch.setattr(rp, "ensure_proxy", lambda p: job)
+    loaded = []
+    monkeypatch.setattr(rp.VideoPreview, "_load_media", lambda self, p: loaded.append(p))
+    ep = review_project(tmp_path).episode
+    pv = rp.VideoPreview()
+    qtbot.addWidget(pv)
+    texts = []
+    pv.status_changed.connect(texts.append)
+    pv.set_source(str(tmp_path / "EP01.mkv"))
+    pv.show_cue(ep.cues[0], "ไทย", "#fff")
+    assert pv.fallback and loaded == [] and "50%" in texts[-1]
+    out.write_bytes(b"x")
+    job.ready = True
+    pv._poll_proxy()
+    assert not pv.fallback and loaded == [str(out)]
