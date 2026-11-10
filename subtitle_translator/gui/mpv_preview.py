@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -78,7 +79,9 @@ class MpvPreview(QWidget):
     duration_changed = Signal(float)
     playing_changed = Signal(bool)
 
-    POLL_MS = 40
+    POLL_MS = 40             # while playing
+    IDLE_POLL_MS = 120       # paused: nothing moves, poll less
+    SEEK_GAP_S = 0.05        # at most one seek per this long; newer requests replace waiting ones
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,6 +98,8 @@ class MpvPreview(QWidget):
         self._was_playing = False
         self._last_pos = -1.0
         self._pending_seek: float | None = None
+        self._queued: tuple[float, bool] | None = None
+        self._last_seek = 0.0
         self._poll = QTimer(self)
         self._poll.setInterval(self.POLL_MS)
         self._poll.timeout.connect(self._tick)
@@ -118,6 +123,7 @@ class MpvPreview(QWidget):
         self._dur = 0.0
         self._last_pos = -1.0
         self._pending_seek = None
+        self._queued = None
         p = self._ensure_player()
         p.pause = True
         p.loadfile(path)
@@ -159,21 +165,34 @@ class MpvPreview(QWidget):
         if pos is not None and abs(pos - self._last_pos) > 0.001:
             self._last_pos = float(pos)
             self.position_changed.emit(self._last_pos)
+        if self._queued is not None and time.monotonic() - self._last_seek >= self.SEEK_GAP_S:
+            (seconds, exact), self._queued = self._queued, None
+            self._seek(seconds, exact)
         playing = not paused
         if playing != self._was_playing:
             self._was_playing = playing
             self.playing_changed.emit(playing)
+        if self._queued is None:
+            self._poll.setInterval(self.POLL_MS if playing else self.IDLE_POLL_MS)
 
     # ----- commands -----
-    def _seek(self, seconds: float) -> None:
+    def _seek(self, seconds: float, exact: bool = True) -> None:
         p = self._player
         if p is None or not self.path:
             return
         if not self._dur:
             self._pending_seek = seconds                 # still opening: mpv would drop it
             return
+        now = time.monotonic()
+        if now - self._last_seek < self.SEEK_GAP_S:
+            # Seeks arriving faster than mpv can show them (dragging the bar) would queue up and
+            # lag behind the hand. Keep only the newest; _tick sends it.
+            self._queued = (seconds, exact)
+            self._poll.setInterval(self.POLL_MS)
+            return
+        self._last_seek, self._queued = now, None
         try:
-            p.seek(max(0.0, seconds), "absolute+exact")
+            p.seek(max(0.0, seconds), "absolute+exact" if exact else "absolute+keyframes")
         except Exception:
             self._pending_seek = seconds
 
@@ -210,3 +229,8 @@ class MpvPreview(QWidget):
 
     def seek(self, seconds: float) -> None:
         self._seek(seconds)
+
+    def scrub(self, seconds: float) -> None:
+        """Seek while the bar is being dragged: jump to the nearest keyframe, which is instant.
+        An exact seek decodes from the keyframe up to the target, slow for AV1 in software."""
+        self._seek(seconds, exact=False)

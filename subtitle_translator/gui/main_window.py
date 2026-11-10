@@ -13,7 +13,7 @@ from ..core.proxy import stop_all as stop_proxies
 from ..core.settings import Settings, save_settings
 from .queue_page import QueuePage
 from .review_page import ReviewPage
-from .motion import slide_in
+from .motion import polish_controls, slide_in
 from .settings_page import SettingsPage
 from .theme import COLORS
 
@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(rail)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
+        polish_controls(self)
         self.go(0)
 
     def go(self, index: int) -> None:

@@ -455,7 +455,9 @@ class ReviewPage(QWidget):
         controls.addWidget(self.stop_btn)
         self.seek_bar = QSlider(Qt.Horizontal)
         self.seek_bar.setRange(0, 0)
-        self.seek_bar.sliderMoved.connect(lambda ms: self.preview.seek(ms / 1000))
+        scrub = getattr(self.preview, "scrub", self.preview.seek)     # fast keyframe seeks while dragging
+        self.seek_bar.sliderMoved.connect(lambda ms: scrub(ms / 1000))
+        self.seek_bar.sliderReleased.connect(lambda: self.preview.seek(self.seek_bar.value() / 1000))
         controls.addWidget(self.seek_bar, 1)
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setProperty("role", "muted")
@@ -834,6 +836,11 @@ class ReviewPage(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._fit_timeline()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        if self.preview.playing:           # leaving the page: do not keep playing sound unseen
+            self.preview.toggle()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

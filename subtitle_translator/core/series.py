@@ -51,6 +51,8 @@ def episode_label(video: str | Path) -> str:
 
 # ----- series names the AI settled on -----
 REGISTRY_NAME = "series_names.json"
+MAX_TITLE = 100              # the title comes from the AI: keep paths well under the Windows limit
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
 def registry_path() -> Path:
@@ -66,12 +68,27 @@ def _video_key(video: str | Path) -> str:
     return os.path.normcase(str(Path(video).resolve()))
 
 
+_registry_cache: tuple[str, int, dict] | None = None
+
+
 def _load_registry() -> dict:
+    """The registry, re-read only when the file changed: folder and file names ask for it often."""
+    global _registry_cache
+    path = registry_path()
     try:
-        d = json.loads(registry_path().read_text(encoding="utf-8"))
-        return {"titles": dict(d.get("titles", {})), "episodes": dict(d.get("episodes", {}))}
-    except (OSError, ValueError, AttributeError):
+        stamp = path.stat().st_mtime_ns
+    except OSError:
         return {"titles": {}, "episodes": {}}
+    if _registry_cache and _registry_cache[:2] == (str(path), stamp):
+        return _registry_cache[2]
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        reg = {"titles": {str(k): str(v) for k, v in d.get("titles", {}).items()},
+               "episodes": {str(k): int(v) for k, v in d.get("episodes", {}).items()}}
+    except (OSError, ValueError, AttributeError, TypeError):
+        reg = {"titles": {}, "episodes": {}}
+    _registry_cache = (str(path), stamp, reg)
+    return reg
 
 
 def _save_registry(reg: dict) -> None:
@@ -92,16 +109,17 @@ def remember_series(video: str | Path, title: str, episode: int | None = None) -
     A title that matches one already known (another file naming of the same show) reuses that
     spelling. Returns the title now in use.
     """
-    reg = _load_registry()
+    old = _load_registry()
+    reg = {"titles": dict(old["titles"]), "episodes": dict(old["episodes"])}   # never edit the cached copy
     k = _key(series_title(video))
-    title = re.sub(r"\s+", " ", title or "").strip()
+    title = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f]", " ", str(title or ""))).strip()[:MAX_TITLE]
     if reg["titles"].get(k):
         title = reg["titles"][k]
     elif title:
         title = next((t for t in reg["titles"].values() if _key(t) == _key(title)), title)
         reg["titles"][k] = title
-    if episode and int(episode) > 0:
-        reg["episodes"][_video_key(video)] = int(episode)
+    if isinstance(episode, int) and 0 < episode < 10000:
+        reg["episodes"][_video_key(video)] = episode
     _save_registry(reg)
     return title or series_title(video)
 
@@ -114,7 +132,8 @@ def display_title(video: str | Path) -> str:
 def episode_number(video: str | Path) -> int | None:
     """Episode number from the file name ("- 05", "EP05", "05.mkv"), else the one the AI found."""
     stem = _TAGS.sub(" ", Path(video).stem).strip()
-    m = re.search(r"(?<!\d)(\d{1,3})(?:v\d)?(?:話)?\s*$", stem)
+    # The number must follow a separator or an episode marker, so "x264" or "h265" is not an episode.
+    m = re.search(r"(?:^|[\s._\-#]|第|(?<![A-Za-z])(?:S\d{1,2})?EP?)(\d{1,3})(?:v\d)?(?:話)?\s*$", stem, re.I)
     if m and int(m.group(1)) > 0:
         return int(m.group(1))
     n = _load_registry()["episodes"].get(_video_key(video))
@@ -122,7 +141,10 @@ def episode_number(video: str | Path) -> int | None:
 
 
 def _safe(text: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]', "_", text).strip(" .") or "series"
+    """A name Windows accepts as a folder or file: no reserved characters or device names, not too long."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+    name = re.sub(r"\.{2,}", ".", name)[:MAX_TITLE].strip(" .") or "series"
+    return "_" + name if name.split(".")[0].upper() in _RESERVED else name
 
 
 def _safe_title(video: str | Path) -> str:

@@ -110,7 +110,3 @@ def apply_theme(app: QApplication) -> None:
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
     app.setStyleSheet(QSS)
-    from .motion import InteractionPolish  # noqa: PLC0415
-    if not hasattr(app, "_polish"):
-        app._polish = InteractionPolish(app)
-        app.installEventFilter(app._polish)

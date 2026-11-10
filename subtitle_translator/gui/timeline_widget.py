@@ -25,6 +25,7 @@ LANE_GAP = 4
 TOP = 24               # ruler height
 FRAME_MS = 16
 GLIDE = 0.22           # share of the remaining distance covered per frame
+HOLD_S = 3.0           # after a manual scroll, wait this long before following the playhead again
 FOLLOW_AT = 0.3        # the playhead sits this far into the view while playing
 TICKS = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600)
 
@@ -55,6 +56,8 @@ class TimelineWidget(QWidget):
         self._hover: int | None = None
         self._drag: tuple[float, float] | None = None
         self._dragged = False
+        self._hold_until = 0.0
+        self._by_id: dict[int, Cue] = {}
         self._hits: list[tuple[QRectF, int]] = []
         self._anim = QTimer(self)
         self._anim.setInterval(FRAME_MS)
@@ -72,6 +75,7 @@ class TimelineWidget(QWidget):
         for key in names:
             lane = sorted((c for c in self.cues if c.speaker == key), key=lambda c: c.start)
             self._lanes[key] = ([c.start for c in lane], lane)
+        self._by_id = {c.id: c for c in self.cues}
         self._end = max((c.end for c in self.cues), default=0.0)
         content = TOP + 6 + max(len(names), 1) * (LANE_H + LANE_GAP)
         self.setMinimumHeight(min(content, TOP + 6 + 3 * (LANE_H + LANE_GAP)))
@@ -80,7 +84,7 @@ class TimelineWidget(QWidget):
 
     def set_selected(self, cue_id: int | None) -> None:
         self.selected = cue_id
-        cue = next((c for c in self.cues if c.id == cue_id), None)
+        cue = self._by_id.get(cue_id)
         if cue is not None and not self.following:
             mid = (cue.start + cue.end) / 2
             if not (self._target + self._span * 0.15 <= mid <= self._target + self._span * 0.85):
@@ -89,12 +93,13 @@ class TimelineWidget(QWidget):
 
     def set_playhead(self, t: float | None) -> None:
         self.playhead = t
-        if t is not None and self.following:
+        if t is not None and self.following and time.perf_counter() >= self._hold_until:
             self._glide_to(t - self._span * FOLLOW_AT)
         self.update()
 
     def set_following(self, on: bool) -> None:
         self.following = on
+        self._hold_until = 0.0
         if on and self.playhead is not None:
             self._glide_to(self.playhead - self._span * FOLLOW_AT)
 
@@ -239,7 +244,7 @@ class TimelineWidget(QWidget):
             self._target = self._clamp(anchor_t - share * self._span_target, self._span_target)
             self._kick()
         else:
-            self.following = False
+            self._hold_until = time.perf_counter() + HOLD_S
             self._glide_to(self._target - steps * self._span_target * 0.15)
         event.accept()
 
@@ -254,7 +259,7 @@ class TimelineWidget(QWidget):
             dx = pos.x() - self._drag[0]
             if abs(dx) > 4:
                 self._dragged = True
-                self.following = False
+                self._hold_until = time.perf_counter() + HOLD_S
                 self.setCursor(Qt.ClosedHandCursor)
                 start = self._clamp(self._drag[1] - dx / self._track_w() * self._span, self._span)
                 self._start = self._target = start          # panning tracks the hand directly
@@ -263,7 +268,7 @@ class TimelineWidget(QWidget):
         hover = self._hit(pos)
         if hover != self._hover:
             self._hover = hover
-            cue = next((c for c in self.cues if c.id == hover), None)
+            cue = self._by_id.get(hover)
             self.setToolTip(f"{_fmt(cue.start)}  {cue.thai or cue.src}" if cue else "")
             self.update()
         self.setCursor(Qt.PointingHandCursor if hover is not None or pos.x() > LABEL_W else Qt.ArrowCursor)

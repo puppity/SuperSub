@@ -20,7 +20,7 @@ from ..ai.factory import make_backend
 from ..core.media import MediaError, SubTrack, lang_of, list_sub_tracks, pick_track, sidecar_subs
 from ..core.proxy import ensure_proxy, needs_proxy
 from .icons import set_icon
-from .motion import animate_progress
+from .motion import animate_progress, polish_controls
 from .mpv_preview import mpv_available
 from ..core.transcribe import TRANSCRIBE, Transcribe, TranscribeError
 from ..core.models import Project, untranslated_ids
@@ -514,6 +514,7 @@ class QueuePage(QWidget):
         self.items.append(item)
         row = len(self.items) - 1
         card = FileCard(lambda _=False, r=row: self._action(r))
+        polish_controls(card)
         card._cands = cands or []
         self.cards.append(card)
         self.list_box.insertWidget(self.list_box.count() - 1, card)

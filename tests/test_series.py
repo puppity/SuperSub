@@ -144,3 +144,17 @@ def test_memory_follows_the_ai_title(tmp_path):
     save_memory(ep2, got, out)
     assert memory_path(ep2, out) == out / "Show X Official" / "Show X Official.series.md"
     assert memory_path(ep2, out).exists()
+
+
+def test_hostile_or_odd_titles_stay_safe_names(tmp_path):
+    from subtitle_translator.core.series import episode_number, remember_series, series_dir
+    v = tmp_path / "clip.mkv"
+    remember_series(v, "..\\..\\Windows/System32:" + "x" * 300, 3)
+    folder = series_dir(v, tmp_path / "out")
+    assert folder.parent == tmp_path / "out" and len(folder.name) <= 100 and ".." not in folder.name
+    w = tmp_path / "other.mkv"
+    remember_series(w, "CON", None)
+    assert series_dir(w, tmp_path / "out").name == "_CON"
+    assert episode_number("Show x264.mkv") is None and episode_number("Show h265.mkv") is None
+    assert episode_number("Show E07.mkv") == 7 and episode_number("Show.S01E03.mkv") == 3
+    assert episode_number("ドラマ 第05話.mp4") == 5 and episode_number("12.mp4") == 12

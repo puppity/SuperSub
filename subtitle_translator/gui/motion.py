@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, Qt
-from PySide6.QtWidgets import QAbstractButton, QAbstractSlider, QComboBox, QProgressBar, QPushButton, QWidget
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt
+from PySide6.QtWidgets import QAbstractButton, QAbstractSlider, QComboBox, QProgressBar, QPushButton, QScrollBar, QWidget
 
 _reduced: bool | None = None
 
@@ -33,17 +33,18 @@ def reduced_motion() -> bool:
     return _reduced
 
 
-class InteractionPolish(QObject):
-    """Installed on the application: adjusts each control once, when Qt first polishes it."""
+def polish_controls(root: QWidget) -> None:
+    """Hand cursor on every clickable control under root, and keyboard-only focus for buttons.
 
-    def eventFilter(self, obj, event) -> bool:
-        if event.type() == QEvent.Polish and isinstance(obj, QWidget):
-            if isinstance(obj, (QAbstractButton, QComboBox, QAbstractSlider)) and not obj.testAttribute(
-                    Qt.WA_SetCursor):
-                obj.setCursor(Qt.PointingHandCursor)
-            if isinstance(obj, QPushButton) and obj.focusPolicy() == Qt.StrongFocus:
-                obj.setFocusPolicy(Qt.TabFocus)
-        return False
+    Called once per window or card when it is built. An application-wide event filter would do
+    the same but runs Python code for every event of every widget, which costs frame time.
+    """
+    for w in [root, *root.findChildren(QWidget)]:
+        clickable = isinstance(w, (QAbstractButton, QComboBox, QAbstractSlider)) and not isinstance(w, QScrollBar)
+        if clickable and not w.testAttribute(Qt.WA_SetCursor):
+            w.setCursor(Qt.PointingHandCursor)
+        if isinstance(w, QPushButton) and w.focusPolicy() == Qt.StrongFocus:
+            w.setFocusPolicy(Qt.TabFocus)
 
 
 def slide_in(page: QWidget, dx: int = 18, ms: int = 200) -> None:
@@ -51,13 +52,20 @@ def slide_in(page: QWidget, dx: int = 18, ms: int = 200) -> None:
     pages that hold a native video window, unlike an opacity effect."""
     if reduced_motion():
         return
-    end = page.pos()
+    old = getattr(page, "_slide", None)
+    if old is not None:
+        old.stop()
+    # The resting place comes from the parent, not page.pos(): a slide still running from a
+    # quick switch back and forth would otherwise leave the page shifted for good.
+    parent = page.parentWidget()
+    end = parent.contentsRect().topLeft() if parent is not None else page.pos()
     anim = QPropertyAnimation(page, b"pos", page)
+    page._slide = anim
     anim.setDuration(ms)
     anim.setStartValue(end + QPoint(dx, 0))
     anim.setEndValue(end)
     anim.setEasingCurve(QEasingCurve.OutCubic)
-    anim.start(QPropertyAnimation.DeleteWhenStopped)
+    anim.start()
 
 
 def animate_progress(bar: QProgressBar, value: int, ms: int = 260) -> None:
