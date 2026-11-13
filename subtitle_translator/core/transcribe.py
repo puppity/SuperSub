@@ -67,10 +67,15 @@ def models_dir() -> Path:
     return p
 
 
-def _add_cuda_dll_dirs() -> None:
-    """pip's nvidia-cublas/cudnn wheels put their DLLs in site-packages/nvidia/*/bin."""
+def _add_cuda_dll_dirs() -> bool:
+    """pip's nvidia-cublas/cudnn wheels put their DLLs in site-packages/nvidia/*/bin.
+
+    Returns whether cuDNN can be found. Without it the GPU model loads but the process dies at
+    the first transcription, so the caller must stay on the CPU.
+    """
     if os.name != "nt":
-        return
+        return True
+    found = False
     roots = [Path(getattr(sys, "_MEIPASS", "")) / "nvidia"] + [Path(p) / "nvidia" for p in sys.path]
     for root in roots:
         if not root.is_dir():
@@ -79,8 +84,13 @@ def _add_cuda_dll_dirs() -> None:
             try:
                 os.add_dll_directory(str(bin_dir))
                 os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+                found = found or any(bin_dir.glob("cudnn*.dll"))
             except OSError:
                 pass
+    if not found:                                   # a system-wide CUDA/cuDNN install
+        import shutil  # noqa: PLC0415
+        found = any(shutil.which(n) for n in ("cudnn_ops64_9.dll", "cudnn64_9.dll", "cudnn64_8.dll"))
+    return found
 
 
 def gpu_available() -> bool:
@@ -93,9 +103,9 @@ def gpu_available() -> bool:
 
 def load_model(name: str):
     """Return a faster_whisper.WhisperModel (downloads it the first time)."""
-    _add_cuda_dll_dirs()
+    cudnn = _add_cuda_dll_dirs()
     from faster_whisper import WhisperModel
-    if gpu_available():
+    if cudnn and gpu_available():
         try:
             return WhisperModel(name, device="cuda", compute_type="float16",
                                 download_root=str(models_dir()))
